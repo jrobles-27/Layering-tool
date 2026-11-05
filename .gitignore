@@ -1,0 +1,7 @@
+# Never commit or publish real data. GitHub Pages would serve anything committed here.
+*.xlsx
+*.xls
+*.xlsm
+*.csv
+~$*
+.claude/settings.local.json

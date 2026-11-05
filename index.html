@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- Privacy: the page may not make ANY network request (connect-src 'none'), load remote scripts, or post forms. -->
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self'; connect-src 'none'; form-action 'none'; base-uri 'none'; object-src 'none'">
+<meta name="referrer" content="no-referrer">
+<title>Exposure Layering</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%233b6cf6'/%3E%3Cpath d='M16 7l9 5-9 5-9-5zM7 17l9 5 9-5M7 21.5l9 5 9-5' fill='none' stroke='white' stroke-width='2' stroke-linejoin='round'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+<div class="app" id="app">
+  <aside class="sidebar">
+    <div class="brand">
+      <div class="logo" id="logo"></div>
+      <div><div class="name">Exposure Layering</div><div class="sub">Refinery commodity risk</div></div>
+    </div>
+    <button class="collapse-btn" id="collapse" aria-label="Collapse sidebar"></button>
+    <nav id="nav"></nav>
+    <div class="side-foot">
+      <div class="ic" id="lockIc"></div>
+      <div class="txt"><b>Nothing is stored</b>Data stays in this browser tab and is gone when you close or refresh it.</div>
+    </div>
+  </aside>
+  <div class="main">
+    <header class="topbar">
+      <button class="btn icon ghost" id="menuBtn" aria-label="Menu"></button>
+      <div class="search">
+        <span id="searchIc"></span>
+        <input id="search" placeholder="Jump to page..." autocomplete="off" aria-label="Jump to page">
+        <kbd>/</kbd>
+        <div class="search-results" id="searchRes"></div>
+      </div>
+      <div class="spacer"></div>
+      <div class="pill-state"><span class="dot" id="stateDot"></span><span id="stateTxt">No data loaded</span></div>
+      <div class="sep"></div>
+      <button class="btn icon ghost" id="theme" aria-label="Toggle theme"></button>
+      <button class="btn primary" id="exportTop" disabled></button>
+    </header>
+    <main class="content" id="page"></main>
+  </div>
+</div>
+<input type="file" id="file" accept=".xlsx,.xlsm,.xls,.csv" hidden>
+<script src="vendor/xlsx.full.min.js"></script>
+<script src="vendor/chart.umd.min.js"></script>
+<script src="js/engine.js"></script>
+<script src="js/parse.js"></script>
+<script src="js/demo.js"></script>
+<script src="js/views.js"></script>
+<script src="js/export.js"></script>
+<script src="js/app.js"></script>
+</body>
+</html>

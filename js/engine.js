@@ -1,0 +1,396 @@
+/* Exposure layering engine. Pure computation, no DOM, no storage, no network.
+ *
+ * Month keys are integers: year*12 + monthIndex(0-11).
+ * Pricing keys also use two sentinels: PRE (pricing month unknown / before the horizon)
+ * and UNPLANNED (crude needed to cover a shortfall - no purchase in the plan).
+ *
+ * Method (FIFO layers):
+ *  1. Crude layers (opening + imports) are consumed FIFO per grade, oldest pricing month first.
+ *  2. Each month's production is a pro-rata blend of the crude layers consumed that month.
+ *  3. Product layers (opening, production, purchases) are sold FIFO, oldest availability first.
+ *  4. Every barrel sold is traced back to its crude pricing month => pricing x sale month matrix.
+ */
+(function (root) {
+  'use strict';
+
+  const MON = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+  const PRE = 0;
+  const UNPLANNED = 1e9;
+  const END = 'END';
+  const EPS = 1e-9;
+
+  function fmtMonth(k) {
+    if (k === PRE) return 'Pre-horizon';
+    if (k === UNPLANNED) return 'Unplanned';
+    if (k === END) return 'Unsold at end';
+    const y = Math.floor(k / 12), m = k % 12;
+    return MON[m] + '-' + String(y % 100).padStart(2, '0');
+  }
+
+  function sum(a) { let s = 0; for (const x of a) s += x; return s; }
+
+  /** Draw `need` from layers (already sorted oldest-first). Returns draws and the unmet remainder. */
+  function drawFifo(layers, need) {
+    const draws = [];
+    for (const l of layers) {
+      if (need <= EPS) break;
+      if (l.rem <= EPS) continue;
+      const take = Math.min(l.rem, need);
+      l.rem -= take;
+      need -= take;
+      draws.push({ layer: l, vol: take });
+    }
+    return { draws, short: need > EPS ? need : 0 };
+  }
+
+  // Order in which product layers are sold within a month. Anything older than the previous month
+  // (including opening inventory) is always sold first, oldest first.
+  const DEFAULT_PRIORITY = ['prevProd', 'prevImp', 'curImp1', 'curProd', 'curImp2'];
+  const PRIORITY_LABELS = {
+    prevProd: "Previous month's production",
+    prevImp: "Previous month's imports",
+    curImp1: "Current month's imports, arriving 1st-15th",
+    curProd: "Current month's production",
+    curImp2: "Current month's imports, arriving 16th-month end"
+  };
+  function validPriority(p) {
+    return Array.isArray(p) && p.length === DEFAULT_PRIORITY.length && DEFAULT_PRIORITY.every(c => p.includes(c));
+  }
+  function openingLabel(pricing) {
+    return pricing === PRE ? 'Opening inventory (pricing month not specified)' : 'Opening inventory (priced ' + fmtMonth(pricing) + ')';
+  }
+
+  function run(inp, opts) {
+    const prio = validPriority(opts && opts.priority) ? opts.priority.slice() : DEFAULT_PRIORITY.slice();
+    const posOf = new Map(prio.map((c, i) => [c, i]));
+    const catOf = (L, t) => {
+      const d = t - L.a;
+      if (L.type === 'Opening' || d >= 2) return 'old';
+      if (d === 1) return L.type === 'Production' ? 'prevProd' : 'prevImp';
+      return L.type === 'Production' ? 'curProd' : (L.half === 2 ? 'curImp2' : 'curImp1');
+    };
+    // Sort key: [group, ...]. Group 0 = old stock (oldest first); group 1 = user-ordered categories.
+    const saleKey = (L, t) => {
+      const c = catOf(L, t);
+      if (c === 'old') return [0, L.a, L.type === 'Opening' ? 0 : posOf.get(L.type === 'Production' ? 'prevProd' : 'prevImp'), L.type === 'Opening' ? L.comp[0].pricing : L.id];
+      return [1, posOf.get(c), 0, L.id];
+    };
+    const cmpKey = (a, b) => { for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return a[i] - b[i]; return 0; };
+    const months = inp.months.slice();
+    const T = months.length;
+    const start = months[0];
+    const idx = k => k - start;
+    const notes = [];
+    const checks = [];
+    const add = (level, title, detail) => checks.push({ level, title, detail });
+
+    // ---------- benchmark maps ----------
+    const crudeBench = {};
+    const openCrude = inp.openCrude || [], openProducts = inp.openProducts || [];
+    inp.crudes.concat(openCrude, inp.crudeImports).forEach(r => { if (r.benchmark && !crudeBench[r.grade]) crudeBench[r.grade] = r.benchmark; });
+    const benchOf = g => crudeBench[g] || 'Unmapped';
+    const prodBench = {};
+    inp.products.concat(openProducts, inp.productPurchases).forEach(r => { if (r.benchmark && !prodBench[r.product]) prodBench[r.product] = r.benchmark; });
+    const pBenchOf = p => prodBench[p] || 'Unmapped';
+
+    // ---------- universes ----------
+    const grades = [];
+    const gset = new Set();
+    const addGrade = g => { if (!gset.has(g)) { gset.add(g); grades.push(g); } };
+    inp.crudes.forEach(r => addGrade(r.grade));
+    openCrude.forEach(r => addGrade(r.grade));
+    inp.crudeImports.forEach(r => addGrade(r.grade));
+    const products = [];
+    const pset = new Set();
+    const addProd = p => { if (!pset.has(p)) { pset.add(p); products.push(p); } };
+    inp.products.forEach(r => addProd(r.product));
+    openProducts.forEach(r => addProd(r.product));
+    inp.productPurchases.forEach(r => addProd(r.product));
+    inp.demand.forEach(r => addProd(r.product));
+
+    // ---------- crude layers ----------
+    let lid = 0;
+    const crudeLayers = [];
+    openCrude.forEach(r => {
+      if (r.volume > 0) {
+        const unspecified = r.pricing == null;
+        if (unspecified) add('warn', 'Opening crude without pricing month', `${r.grade}: ${r.volume} kb of opening inventory has no pricing month - assigned to "Pre-horizon". Add the pricing month in the input.`);
+        crudeLayers.push({ id: lid++, grade: r.grade, bench: benchOf(r.grade), pricing: unspecified ? PRE : r.pricing, avail: 0, vol: r.volume, rem: r.volume, src: 'Opening' });
+      }
+    });
+    inp.crudeImports.forEach(r => {
+      const a = idx(r.arrival);
+      if (a >= T) { add('info', 'Crude import after horizon (ignored)', `${r.grade} ${fmtMonth(r.arrival)}: ${r.volume} kb.`); return; }
+      if (a < 0) add('info', 'Crude import before horizon start', `${r.grade} arriving ${fmtMonth(r.arrival)} (${r.volume} kb) is added to opening supply and available from ${fmtMonth(start)}.`);
+      let pricing = r.pricing;
+      if (pricing == null) { pricing = r.arrival - 1; add('warn', 'Import without pricing month', `${r.grade} ${fmtMonth(r.arrival)}: assumed priced in ${fmtMonth(pricing)} (arrival - 1).`); }
+      crudeLayers.push({ id: lid++, grade: r.grade, bench: benchOf(r.grade), pricing, avail: Math.max(0, a), vol: r.volume, rem: r.volume, src: 'Import', arrival: r.arrival });
+    });
+    // cargo labels (every crude layer = one cargo): "Grade | arr Jan-27 | priced Dec-26"
+    const cargoSeen = new Map();
+    crudeLayers.forEach(l => {
+      const base = l.src === 'Opening'
+        ? `${l.grade} | opening, priced ${l.pricing === PRE ? 'not specified' : fmtMonth(l.pricing)}`
+        : `${l.grade} | arr ${fmtMonth(l.arrival)} | priced ${fmtMonth(l.pricing)}`;
+      const n = (cargoSeen.get(base) || 0) + 1; cargoSeen.set(base, n);
+      l.label = n > 1 ? `${base} #${n}` : base;
+    });
+    const extraCargo = [];  // pseudo-cargoes for unplanned (shortfall) crude
+    const cargoUse = [];    // {cargoId, t, month, vol}: crude of each cargo consumed in each production month
+    const prodKeyOf = L => L.type === 'Production' ? months[L.a] : (L.type === 'Opening' ? 'Opening stock' : 'Purchased product');
+    const consumption = {}; // grade -> [T]
+    grades.forEach(g => { consumption[g] = new Array(T).fill(0); });
+    inp.crudes.forEach(r => { for (const k in r.consumption) { const i = idx(+k); if (i >= 0 && i < T) consumption[r.grade][i] += r.consumption[k]; } });
+
+    // ---------- production / demand / purchases ----------
+    const production = {}, demand = {};
+    products.forEach(p => { production[p] = new Array(T).fill(0); demand[p] = new Array(T).fill(0); });
+    inp.products.forEach(r => { for (const k in r.production) { const i = idx(+k); if (i >= 0 && i < T) production[r.product][i] += r.production[k]; } });
+    inp.demand.forEach(r => { for (const k in r.demand) { const i = idx(+k); if (i >= 0 && i < T) demand[r.product][i] += r.demand[k]; } });
+
+    let plid = 0;
+    const prodLayers = [];
+    openProducts.forEach(r => {
+      if (r.volume > 0) {
+        const unspecified = r.pricing == null;
+        if (unspecified) add('warn', 'Opening product without pricing month', `${r.product}: ${r.volume} kb of opening inventory has no pricing month - assigned to "Pre-horizon". Add the pricing month in the input.`);
+        const pk = unspecified ? PRE : r.pricing;
+        prodLayers.push({ id: plid++, product: r.product, type: 'Opening', a: -999, half: 0, avail: 0, label: openingLabel(pk), vol: r.volume, rem: r.volume,
+          comp: [{ pricing: pk, grade: 'Opening product', bench: pBenchOf(r.product), src: 'Opening product', share: 1 }] });
+      }
+    });
+    const purchasesByT = Array.from({ length: T }, () => []);
+    inp.productPurchases.forEach(r => {
+      const a = idx(r.arrival);
+      if (a >= T) { add('info', 'Product purchase after horizon (ignored)', `${r.product} ${fmtMonth(r.arrival)}: ${r.volume} kb.`); return; }
+      if (a < 0) add('info', 'Product purchase before horizon start', `${r.product} arriving ${fmtMonth(r.arrival)} is available from ${fmtMonth(start)}.`);
+      let pricing = r.pricing;
+      if (pricing == null) { pricing = r.arrival - 1; add('warn', 'Product purchase without pricing month', `${r.product} ${fmtMonth(r.arrival)}: assumed priced in ${fmtMonth(pricing)} (arrival - 1).`); }
+      const t = Math.max(0, a);
+      const half = r.half === 2 ? 2 : 1;
+      const L = { id: plid++, product: r.product, type: 'Purchase', a, half, avail: t, label: 'Purchase ' + fmtMonth(r.arrival) + (half === 2 ? ' (2nd half)' : ' (1st half)'), vol: r.volume, rem: r.volume,
+        comp: [{ pricing, grade: 'Purchased product', bench: pBenchOf(r.product), src: 'Purchased product', share: 1 }] };
+      prodLayers.push(L);
+    });
+
+    // ---------- outputs ----------
+    const expRows = [];     // traced exposure rows (sold + unsold at end)
+    const sales = [];       // product layering: product x layer x sale month
+    const snaps = [];       // month-end exposure rows
+    const prodInv = [];     // month-end product inventory by layer
+    const crudeInv = [];    // month-end crude inventory by layer
+    const crudeBal = [];    // grade x month
+    const prodBal = [];     // product x month
+    const unmet = [];       // {product,t,vol}
+    const shortfalls = [];  // {grade,t,vol}
+    const consumedByMonth = new Array(T).fill(0);
+    const producedByMonth = new Array(T).fill(0);
+    const sold = {}; products.forEach(p => { sold[p] = new Array(T).fill(0); });
+
+    const crudeClose = {}; grades.forEach(g => { crudeClose[g] = sum(crudeLayers.filter(l => l.grade === g && l.src === 'Opening').map(l => l.vol)); });
+    const prodClose = {}; products.forEach(p => { prodClose[p] = sum(prodLayers.filter(l => l.product === p && l.type === 'Opening').map(l => l.vol)); });
+
+    for (let t = 0; t < T; t++) {
+      const mk = months[t];
+      // --- crude consumption (FIFO per grade) ---
+      const parts = new Map(); // key -> part
+      let C = 0;
+      grades.forEach(g => {
+        const need = consumption[g][t];
+        const receipts = sum(crudeLayers.filter(l => l.grade === g && l.src === 'Import' && l.avail === t).map(l => l.vol));
+        const open = crudeClose[g];
+        let consumed = 0, shortVol = 0;
+        if (need > 0) {
+          const avail = crudeLayers.filter(l => l.grade === g && l.avail <= t && l.rem > EPS)
+            .sort((a, b) => a.pricing - b.pricing || a.avail - b.avail || a.id - b.id);
+          const { draws, short } = drawFifo(avail, need);
+          draws.forEach(d => {
+            consumed += d.vol;
+            const p = parts.get(d.layer.id) || { cargoId: d.layer.id, cargo: d.layer.label, pricing: d.layer.pricing, grade: g, bench: d.layer.bench, src: 'Crude', vol: 0 };
+            p.vol += d.vol; parts.set(d.layer.id, p);
+            cargoUse.push({ cargoId: d.layer.id, t, month: mk, vol: d.vol });
+          });
+          if (short > 0) {
+            shortVol = short;
+            shortfalls.push({ grade: g, t, vol: short });
+            const uid = lid++, ulabel = `${g} | unplanned ${fmtMonth(mk)}`;
+            extraCargo.push({ id: uid, label: ulabel, grade: g, bench: benchOf(g), pricing: UNPLANNED, arrival: null, src: 'Unplanned', vol: short });
+            parts.set(uid, { cargoId: uid, cargo: ulabel, pricing: UNPLANNED, grade: g, bench: benchOf(g), src: 'Crude', vol: short });
+            cargoUse.push({ cargoId: uid, t, month: mk, vol: short });
+          }
+          C += need;
+        }
+        const close = sum(crudeLayers.filter(l => l.grade === g && l.avail <= t).map(l => l.rem));
+        crudeClose[g] = close;
+        crudeBal.push({ grade: g, t, month: mk, open, receipts, consumed, unplanned: shortVol, close });
+      });
+      consumedByMonth[t] = C;
+
+      // --- production layers: pro-rata blend of crude consumed this month ---
+      let P = 0;
+      const compList = [...parts.values()].map(p => ({ cargoId: p.cargoId, cargo: p.cargo, pricing: p.pricing, grade: p.grade, bench: p.bench, src: 'Crude', share: C > 0 ? p.vol / C : 0 }));
+      products.forEach(p => {
+        const v = production[p][t];
+        P += v;
+        if (v > 0) {
+          const comp = C > 0 ? compList : [{ cargoId: -1, cargo: 'Unattributed', pricing: UNPLANNED, grade: 'Unattributed', bench: 'Unmapped', src: 'Crude', share: 1 }];
+          prodLayers.push({ id: plid++, product: p, type: 'Production', a: t, half: 0, avail: t, label: 'Prod ' + fmtMonth(mk), vol: v, rem: v, comp });
+        }
+      });
+      producedByMonth[t] = P;
+      if (P > 0 && C <= 0) add('error', 'Production without crude consumption', `${fmtMonth(mk)}: ${P.toFixed(1)} kb produced but no crude consumption planned; exposure cannot be traced.`);
+      if (C > 0 && Math.abs(P - C) / C > 0.001) add('warn', 'Yield does not match crude consumption', `${fmtMonth(mk)}: crude ${C.toFixed(1)} kb vs products ${P.toFixed(1)} kb (${(P - C >= 0 ? '+' : '') + (P - C).toFixed(1)}). Product exposure is traced pro-rata to crude consumed.`);
+
+      // --- demand (FIFO per product) ---
+      products.forEach(p => {
+        const open = prodClose[p];
+        const prod = production[p][t];
+        const purch = sum(prodLayers.filter(l => l.product === p && l.type === 'Purchase' && l.avail === t).map(l => l.vol));
+        const need = demand[p][t];
+        let soldVol = 0, unmetVol = 0;
+        if (need > 0) {
+          const avail = prodLayers.filter(l => l.product === p && l.avail <= t && l.rem > EPS)
+            .map(l => ({ l, k: saleKey(l, t) }))
+            .sort((x, y) => cmpKey(x.k, y.k)).map(x => x.l);
+          const { draws, short } = drawFifo(avail, need);
+          draws.forEach(d => {
+            soldVol += d.vol;
+            sales.push({ product: p, sale: mk, layer: d.layer.label, type: d.layer.type, vol: d.vol });
+            d.layer.comp.forEach(c => {
+              const v = d.vol * c.share;
+              if (v > EPS) expRows.push({ stage: 'Sold', product: p, pbench: pBenchOf(p), sale: mk, layer: d.layer.label, prodKey: prodKeyOf(d.layer), cargoId: c.cargoId == null ? null : c.cargoId, cargo: c.cargo || '', src: c.src, pricing: c.pricing, grade: c.grade, bench: c.bench, vol: v });
+            });
+          });
+          if (short > 0) { unmetVol = short; unmet.push({ product: p, t, vol: short }); }
+        }
+        sold[p][t] = soldVol;
+        const close = sum(prodLayers.filter(l => l.product === p && l.avail <= t).map(l => l.rem));
+        prodClose[p] = close;
+        prodBal.push({ product: p, t, month: mk, open, production: prod, purchases: purch, sales: soldVol, unmet: unmetVol, close, demand: need });
+      });
+
+      // --- month-end snapshots ---
+      const snap = [];
+      crudeLayers.filter(l => l.avail <= t && l.rem > EPS).forEach(l => {
+        snap.push({ kind: 'Crude inventory', product: '', pbench: '', src: 'Crude', pricing: l.pricing, grade: l.grade, bench: l.bench, vol: l.rem });
+        crudeInv.push({ t, month: mk, grade: l.grade, pricing: l.pricing, src: l.src, vol: l.rem });
+      });
+      prodLayers.filter(l => l.avail <= t && l.rem > EPS).forEach(l => {
+        prodInv.push({ t, month: mk, product: l.product, layer: l.label, type: l.type, vol: l.rem });
+        l.comp.forEach(c => snap.push({ kind: 'Product inventory', product: l.product, pbench: pBenchOf(l.product), src: c.src, pricing: c.pricing, grade: c.grade, bench: c.bench, vol: l.rem * c.share }));
+      });
+      snaps.push(snap);
+    }
+
+    // ---------- end of horizon: what is still unsold ----------
+    crudeLayers.filter(l => l.rem > EPS).forEach(l => {
+      expRows.push({ stage: 'Unconsumed crude', product: '', pbench: '', sale: END, layer: 'Crude inventory', prodKey: 'Not yet consumed', cargoId: l.id, cargo: l.label, src: 'Crude', pricing: l.pricing, grade: l.grade, bench: l.bench, vol: l.rem });
+    });
+    prodLayers.filter(l => l.rem > EPS).forEach(l => {
+      l.comp.forEach(c => expRows.push({ stage: 'Unsold product', product: l.product, pbench: pBenchOf(l.product), sale: END, layer: l.label, prodKey: prodKeyOf(l), cargoId: c.cargoId == null ? null : c.cargoId, cargo: c.cargo || '', src: c.src, pricing: c.pricing, grade: c.grade, bench: c.bench, vol: l.rem * c.share }));
+      sales.push({ product: l.product, sale: END, layer: l.label, type: l.type, vol: l.rem });
+    });
+
+    // ---------- display order of product layers (chronological) ----------
+    const lorder = new Map();
+    prodLayers.forEach(l => {
+      const within = l.type === 'Purchase' ? (l.half === 2 ? 3 : 1) : 2;
+      const k = l.type === 'Opening' ? [-1, l.comp[0].pricing] : [l.a, within];
+      if (!lorder.has(l.label)) lorder.set(l.label, k);
+    });
+    const layerOrder = [...lorder.entries()].sort((x, y) => x[1][0] - y[1][0] || x[1][1] - y[1][1]).map(x => x[0]);
+
+    if (inp.productPurchases.length) {
+      const n2 = inp.productPurchases.filter(r => r.half === 2).length;
+      add('info', 'Product purchase arrival timing', `${inp.productPurchases.length - n2} purchase(s) in the 1st half of the month, ${n2} in the 2nd half. Taken from the day of the arrival date (16th or later = 2nd half) or the "Arrival Half" column; a month-only date counts as 1st half.`);
+    }
+
+    // ---------- checks ----------
+    const unmappedG = grades.filter(g => !crudeBench[g]);
+    if (unmappedG.length) add('warn', 'Crude grades without benchmark', unmappedG.join(', ') + ' - shown as "Unmapped".');
+    const unmappedP = products.filter(p => !prodBench[p]);
+    if (unmappedP.length) add('warn', 'Products without benchmark', unmappedP.join(', ') + ' - shown as "Unmapped".');
+    if (shortfalls.length) {
+      const byG = {};
+      shortfalls.forEach(s => { (byG[s.grade] = byG[s.grade] || []).push(`${fmtMonth(months[s.t])} ${s.vol.toFixed(0)} kb`); });
+      Object.keys(byG).forEach(g => add('warn', `Crude shortfall: ${g}`, byG[g].join('; ') + '. Needs additional purchases - shown as "Unplanned" pricing.'));
+    }
+    if (unmet.length) {
+      const byP = {};
+      unmet.forEach(s => { (byP[s.product] = byP[s.product] || []).push(`${fmtMonth(months[s.t])} ${s.vol.toFixed(0)} kb`); });
+      Object.keys(byP).forEach(p => add('warn', `Unmet demand: ${p}`, byP[p].join('; ') + '. Needs product purchases or lower demand.'));
+    }
+    products.forEach(p => {
+      if (!(production[p].some(v => v > 0) || openProducts.some(r => r.product === p && r.volume > 0) || inp.productPurchases.some(r => r.product === p)) && demand[p].some(v => v > 0)) {
+        add('warn', `Demand without any supply: ${p}`, 'No opening stock, production or purchases for this product.');
+      }
+    });
+    const endCrude = sum(crudeLayers.map(l => l.rem));
+    const endProd = sum(prodLayers.map(l => l.rem));
+    if (endProd > 0) add('info', 'Ending product inventory', `${endProd.toFixed(0)} kb of product remains unsold at the end of the horizon (exposure left open).`);
+    if (endCrude > 0) add('info', 'Ending crude inventory', `${endCrude.toFixed(0)} kb of crude remains unconsumed at the end of the horizon.`);
+    if (!checks.some(c => c.level === 'error' || c.level === 'warn')) add('ok', 'No blocking issues found', 'Mass balance, supply cover and demand cover all pass.');
+
+    // ---------- summary ----------
+    const soldRows = expRows.filter(r => r.stage === 'Sold');
+    const aged = soldRows.filter(r => r.pricing !== PRE && r.pricing !== UNPLANNED);
+    const agedVol = sum(aged.map(r => r.vol));
+    const waAge = agedVol > 0 ? sum(aged.map(r => r.vol * (r.sale - r.pricing))) / agedVol : null;
+    const totals = snaps.map(s => sum(s.map(r => r.vol)));
+    let peakT = 0; totals.forEach((v, i) => { if (v > totals[peakT]) peakT = i; });
+    const totalSold = sum(soldRows.filter(r => r.src).map(r => r.vol));
+    const totalDemand = sum(products.map(p => sum(demand[p])));
+    const totalUnmet = sum(unmet.map(u => u.vol));
+    const totalShort = sum(shortfalls.map(s => s.vol));
+
+    const summary = {
+      totalConsumed: sum(consumedByMonth), totalProduced: sum(producedByMonth), totalDemand,
+      totalSold: totalDemand - totalUnmet, totalUnmet, totalShort, endCrude, endProd,
+      waAge, peakExposure: totals.length ? totals[peakT] : 0, peakMonth: months[peakT],
+      openingExposure: sum(crudeLayers.filter(l => l.src === 'Opening').map(l => l.vol)) + sum(prodLayers.filter(l => l.type === 'Opening').map(l => l.vol)),
+      endExposure: totals.length ? totals[totals.length - 1] : 0,
+      demandCover: totalDemand > 0 ? (totalDemand - totalUnmet) / totalDemand : 1,
+      monthTotals: totals
+    };
+
+    return { months, grades, products, crudeBench, prodBench, expRows, sales, snaps, prodInv, crudeInv, crudeBal, prodBal, unmet, shortfalls,
+      consumedByMonth, producedByMonth, sold, demand, production, checks, summary, notes, layerOrder, priority: prio, cargoUse,
+      cargoes: crudeLayers.map(l => ({ id: l.id, label: l.label, grade: l.grade, bench: l.bench, pricing: l.pricing, arrival: l.arrival == null ? null : l.arrival, src: l.src, vol: l.vol })).concat(extraCargo) };
+  }
+
+  // ---------- pivot ----------
+  function sortKeys(keys) {
+    return keys.sort((a, b) => {
+      const na = typeof a === 'number', nb = typeof b === 'number';
+      if (na && nb) return a - b;
+      if (na) return -1;
+      if (nb) return 1;
+      if (a === END) return 1;
+      if (b === END) return -1;
+      return String(a).localeCompare(String(b));
+    });
+  }
+
+  function pivot(rows, rowFn, colFn, opts) {
+    opts = opts || {};
+    const cells = new Map(), rset = new Set(), cset = new Set();
+    let total = 0;
+    rows.forEach(r => {
+      const rk = rowFn(r), ck = colFn(r);
+      rset.add(rk); cset.add(ck);
+      const key = rk + '\u0001' + ck;
+      cells.set(key, (cells.get(key) || 0) + r.vol);
+      total += r.vol;
+    });
+    let rowKeys = [...rset], colKeys = [...cset];
+    if (opts.rowKeys) rowKeys = opts.rowKeys.filter(k => true); else sortKeys(rowKeys);
+    if (opts.colKeys) colKeys = opts.colKeys; else sortKeys(colKeys);
+    const get = (rk, ck) => cells.get(rk + '\u0001' + ck) || 0;
+    const rowTotals = rowKeys.map(rk => sum(colKeys.map(ck => get(rk, ck))));
+    const colTotals = colKeys.map(ck => sum(rowKeys.map(rk => get(rk, ck))));
+    return { rowKeys, colKeys, get, rowTotals, colTotals, total };
+  }
+
+  const api = { run, pivot, fmtMonth, PRE, UNPLANNED, END, MON, sum, DEFAULT_PRIORITY, PRIORITY_LABELS, validPriority };
+  if (typeof module !== 'undefined' && module.exports) module.exports = api; else root.Engine = api;
+})(typeof window !== 'undefined' ? window : globalThis);

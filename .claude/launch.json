@@ -1,0 +1,6 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    { "name": "layering-tool", "runtimeExecutable": "node", "runtimeArgs": ["tests/serve.js", "5173"], "port": 5173 }
+  ]
+}
