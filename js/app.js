@@ -6,6 +6,7 @@
   const $ = s => document.querySelector(s);
 
   // ---------- helpers ----------
+  const WIN = () => V.resolveWin(S.R, S.win);   // display window (Settings); default = product horizon
   const esc = s => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   const fmt = (v, d) => Math.abs(v) < 1e-9 ? '–' : v.toLocaleString('en-US', { minimumFractionDigits: d || 0, maximumFractionDigits: d || 0 });
   const sum = E.sum;
@@ -31,6 +32,8 @@
     file: '<path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/><path d="M14 2v4a2 2 0 0 0 2 2h4"/><path d="M10 9H8M16 13H8M16 17H8"/>',
     activity: '<path d="M22 12h-4l-3 9L9 3l-3 9H2"/>',
     trash: '<path d="M3 6h18"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>',
+    cog: '<path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/>',
+    cal: '<rect width="18" height="18" x="3" y="4" rx="2" ry="2"/><line x1="16" x2="16" y1="2" y2="6"/><line x1="8" x2="8" y1="2" y2="6"/><line x1="3" x2="21" y1="10" y2="10"/>',
     up: '<path d="m18 15-6-6-6 6"/>',
     down: '<path d="m6 9 6 6 6-6"/>',
     reset: '<path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/>',
@@ -43,7 +46,7 @@
 
   // ---------- state ----------
   const S = {
-    page: 'data', input: null, R: null, issues: [], file: '', priority: E.DEFAULT_PRIORITY.slice(),
+    page: 'data', input: null, R: null, issues: [], file: '', win: null, priority: E.DEFAULT_PRIORITY.slice(),
     f: { crude: { bench: '', grade: '', product: '', src: '', dim: 'pricing' }, prod: { product: '' }, me: { dim: 'pricing', kind: '', bench: '' }, pct: { row: 'pricing', col: 'sale', basis: 'col' }, cargo: { mode: 'prod', show: 'vol', cargoId: '' }, dash: { dim: 'pricing', month: null }, bal: {} },
     charts: [], after: [], priceColors: {}
   };
@@ -56,7 +59,8 @@
     { id: 'monthend', label: 'Month-End Profile', icon: 'bar', group: 'Analysis', sub: 'Open crude inventory exposure at each month-end, by pricing month.' },
     { id: 'balances', label: 'Balances', icon: 'table', group: 'Review', sub: 'Opening, receipts, consumption and closing by crude grade and product.' },
     { id: 'checks', label: 'Data Checks', icon: 'alert', group: 'Review', sub: 'Mass balance, supply cover and input quality.' },
-    { id: 'data', label: 'Data Input', icon: 'upload', group: 'Data', sub: 'Load this session\'s inputs. Nothing is saved - you will need to load them again next time.' }
+    { id: 'data', label: 'Data Input', icon: 'upload', group: 'Data', sub: 'Load this session\'s inputs. Nothing is saved - you will need to load them again next time.' },
+    { id: 'settings', label: 'Settings', icon: 'cog', group: 'Data', sub: 'Choose which months to display. Applies to every page and to the Excel export.' }
   ];
 
   // ---------- colours ----------
@@ -176,40 +180,51 @@
 
   // ---------- pages ----------
   function pageDash() {
-    const R = S.R, s = R.summary, T = R.months.length;
-    // average exposure age per sales month (for sparkline)
-    const ageBy = R.months.map(mk => {
-      const rows = R.expRows.filter(r => r.stage === 'Sold' && r.sale === mk && r.pricing !== E.PRE && r.pricing !== E.UNPLANNED);
+    const R = S.R, s = R.summary, w = WIN();
+    const wm = V.winMonths(R, w), pm = V.pMonthsInWin(R, w);
+    const inW = k => k >= w.start && k <= w.end;
+    // KPIs follow the display window (Settings)
+    const tot = wm.map(m => s.monthTotals[R.months.indexOf(m)]);
+    let pi = 0; tot.forEach((v, i) => { if (v > tot[pi]) pi = i; });
+    const soldW = R.expRows.filter(r => r.stage === 'Sold' && inW(r.sale) && r.pricing !== E.PRE && r.pricing !== E.UNPLANNED);
+    const ageV = sum(soldW.map(r => r.vol));
+    const ageW = ageV > 0 ? sum(soldW.map(r => r.vol * (r.sale - r.pricing))) / ageV : null;
+    const ageBy = pm.map(mk => {
+      const rows = soldW.filter(r => r.sale === mk);
       const v = sum(rows.map(r => r.vol)); return v > 0 ? sum(rows.map(r => r.vol * (r.sale - r.pricing))) / v : 0;
     });
-    const soldBy = R.months.map((_, t) => sum(R.prodBal.filter(b => b.t === t).map(b => b.sales)));
-    const shortBy = R.months.map((_, t) => sum(R.crudeBal.filter(b => b.t === t).map(b => b.unplanned)) + sum(R.prodBal.filter(b => b.t === t).map(b => b.unmet)));
-    const gaps = s.totalShort + s.totalUnmet;
+    const balW = R.prodBal.filter(b => inW(b.month));
+    const demW = sum(balW.map(b => b.demand)), unmetW = sum(balW.map(b => b.unmet));
+    const shortW = sum(R.shortfalls.filter(x => inW(R.months[x.t])).map(x => x.vol));
+    const soldBy = pm.map(mk => sum(R.prodBal.filter(b => b.month === mk).map(b => b.sales)));
+    const shortBy = pm.map(mk => sum(R.crudeBal.filter(b => b.month === mk).map(b => b.unplanned)) + sum(R.prodBal.filter(b => b.month === mk).map(b => b.unmet)));
+    const gaps = shortW + unmetW;
+    const cover = demW > 0 ? (demW - unmetW) / demW : 1;
     const kpis = `<div class="grid g4">
-      ${kpi(1, 'Peak month-end exposure', fmt(s.peakExposure), 'kb', `<span>in ${fm(s.peakMonth)} · opening ${fmt(s.openingExposure)} kb</span>`, 'layers', 'blue', s.monthTotals, '#3b6cf6')}
-      ${kpi(2, 'Avg exposure age', s.waAge == null ? 'n/a' : s.waAge.toFixed(1), 'months', '<span>crude pricing month → product sale</span>', 'clock', 'violet', ageBy, '#a855f7')}
-      ${kpi(3, 'Demand covered', (s.demandCover * 100).toFixed(1), '%', `<span class="${s.totalUnmet > 0 ? 'down' : 'up'}">${fmt(s.totalUnmet)} kb unmet of ${fmt(s.totalDemand)} kb</span>`, 'percent', s.totalUnmet > 0 ? 'amber' : 'green', soldBy, s.totalUnmet > 0 ? '#f59e0b' : '#10b981')}
-      ${kpi(4, 'Supply gaps', fmt(gaps), 'kb', `<span>${fmt(s.totalShort)} kb unplanned crude · ${fmt(s.totalUnmet)} kb unmet product</span>`, 'alert', gaps > 0 ? 'rose' : 'green', shortBy, gaps > 0 ? '#f43f5e' : '#10b981')}
+      ${kpi(1, 'Peak month-end exposure', fmt(tot[pi] || 0), 'kb', `<span>in ${tot.length ? fm(wm[pi]) : '-'} · window end ${fmt(tot[tot.length - 1] || 0)} kb</span>`, 'layers', 'blue', tot, '#3b6cf6')}
+      ${kpi(2, 'Avg exposure age', ageW == null ? 'n/a' : ageW.toFixed(1), 'months', '<span>crude pricing month → product sale</span>', 'clock', 'violet', ageBy, '#a855f7')}
+      ${kpi(3, 'Demand covered', (cover * 100).toFixed(1), '%', `<span class="${unmetW > 0 ? 'down' : 'up'}">${fmt(unmetW)} kb unmet of ${fmt(demW)} kb</span>`, 'percent', unmetW > 0 ? 'amber' : 'green', soldBy, unmetW > 0 ? '#f59e0b' : '#10b981')}
+      ${kpi(4, 'Supply gaps', fmt(gaps), 'kb', `<span>${fmt(shortW)} kb unplanned crude · ${fmt(unmetW)} kb unmet product</span>`, 'alert', gaps > 0 ? 'rose' : 'green', shortBy, gaps > 0 ? '#f43f5e' : '#10b981')}
     </div>`;
 
     const d = S.f.dash;
-    if (d.month == null || !R.months.includes(d.month)) d.month = s.peakMonth;
-    const meAll = V.monthEnd(R, d.dim, '');
+    if (d.month == null || !wm.includes(d.month)) d.month = wm.length ? wm[pi] : R.productStart;
+    const meAll = V.monthEnd(R, d.dim, '', {}, w);
     const ser = seriesFromPivot(meAll, d.dim);
     const main = card('Month-end exposure', 'Volume still exposed to price at each month-end (crude in tanks + product in tanks).',
       barChart('c_dash_me', ser.labels, ser.series, true),
       seg('dash.dim', d.dim, [['pricing', 'Pricing month'], ['bench', 'Benchmark'], ['kind', 'Inventory type']]));
-    const mb = V.monthEnd(R, 'bench', '');
+    const mb = V.monthEnd(R, 'bench', '', {}, w);
     const bi = mb.colKeys.indexOf(d.month);
     const bd = mb.rowKeys.map((rk, i) => ({ l: rk, v: mb.get(rk, d.month), c: PALETTE[i % PALETTE.length] })).filter(x => x.v > 1e-9);
     const side = card('Exposure by benchmark', `Month-end ${fm(d.month)}`,
       donut('c_dash_bench', bd.map(x => x.l), bd.map(x => x.v), bd.map(x => x.c)) +
       `<div class="legend" style="flex-direction:column;gap:7px;margin-top:14px">${bd.map(x => `<div style="display:flex;align-items:center;justify-content:space-between;color:var(--foreground)"><span><span class="sw" style="background:${x.c}"></span>${esc(x.l)}</span><b>${fmt(x.v)} kb · ${bi >= 0 ? (x.v / mb.colTotals[bi] * 100).toFixed(0) : 0}%</b></div>`).join('')}</div>`,
-      select('', 'dash.month', d.month, R.months.map(m => [m, fm(m)])));
+      select('', 'dash.month', d.month, wm.map(m => [m, fm(m)])));
 
-    const cl = V.crudeLayering(R, {}, 'pricing'); const cs = seriesFromPivot(cl, 'pricing', false);
+    const cl = V.crudeLayering(R, {}, 'pricing', 'sale', w); const cs = seriesFromPivot(cl, 'pricing', false);
     const rel = card('Exposure released by sales month', 'Barrels sold each month, coloured by the month their crude was priced.', barChart('c_dash_rel', cs.labels, cs.series, true));
-    const mg = V.marginByProduct(R); const ms = seriesFromPivot(mg, 'product', true);
+    const mg = V.marginByProduct(R, w); const ms = seriesFromPivot(mg, 'product', true);
     const mgn = card('Margin exposure by product', 'Product volume sold per month - the crack exposure of each sales month.', barChart('c_dash_mg', ms.labels, ms.series, true));
 
     const attn = R.checks.filter(c => c.level === 'error' || c.level === 'warn').slice(0, 5);
@@ -227,7 +242,7 @@
       ['prod|sale|col', 'Sales mix by production month'], ['prod|sale|row', 'Where each production month is sold'], ['pricing|prod|row', 'Pricing → production month']];
     const cur = [p.row, p.col, p.basis].join('|');
     const presetBar = `<div class="seg" style="flex-wrap:wrap">${presets.map(([v, l]) => `<button class="${v === cur ? 'on' : ''}" data-preset="${v}">${l}</button>`).join('')}</div>`;
-    const pv = V.crudeLayering(R, filt, p.row, p.col);
+    const pv = V.crudeLayering(R, filt, p.row, p.col, WIN());
     const pp = V.pct(pv, p.basis);
     const rl = V.DIMS[p.row].label.toLowerCase(), cl = V.DIMS[p.col].label.toLowerCase();
     const what = p.basis === 'col' ? `Each ${cl} column adds up to 100%: the share of that ${cl}'s volume that comes from each ${rl}.`
@@ -261,15 +276,15 @@
     const pctOn = c.show === 'pct';
     let sub, table;
     if (c.mode === 'prod') {
-      const { pv } = V.cargoByProduction(R, cf);
+      const { pv } = V.cargoByProduction(R, cf, WIN());
       sub = 'Crude kb of each cargo run through the refinery in each production month. "Not yet consumed" = still in tanks at the end of the horizon.' + (pctOn ? ' Each cargo row = 100%.' : '');
       table = matrix(pctOn ? V.pct(pv, 'row') : pv, { rowFmt: lab, rowColor: color, rowHdr: 'Cargo (grade | arrival | pricing month)', colFmt: monthOrText, dec: pctOn ? 1 : 0 });
     } else if (c.mode === 'sale') {
-      const { pv } = V.cargoBySales(R, cf);
+      const { pv } = V.cargoBySales(R, cf, WIN());
       sub = 'Product kb traced to each cargo, by the month that product is sold. "Unsold at end" = product (or crude) still in stock at the end of the horizon. Product kb can differ slightly from crude kb where yields are not 100%.' + (pctOn ? ' Each cargo row = 100%.' : '');
       table = matrix(pctOn ? V.pct(pv, 'row') : pv, { rowFmt: lab, rowColor: color, rowHdr: 'Cargo (grade | arrival | pricing month)', colFmt: fm, dec: pctOn ? 1 : 0 });
     } else {
-      const pv = V.cargoProdSales(R, cf, c.cargoId === '' ? null : c.cargoId);
+      const pv = V.cargoProdSales(R, cf, c.cargoId === '' ? null : c.cargoId, WIN());
       sub = (c.cargoId === '' ? 'All cargoes combined: ' : 'The selected cargo: ') + 'product kb by the month it was produced (rows) and the month it is sold (columns).' + (pctOn ? ' Cells are % of the total shown.' : '');
       table = matrix(pctOn ? V.pct(pv, 'total') : pv, { dim: 'prod', rowHdr: 'Production month ↓ / sales month →', colFmt: fm, dec: pctOn ? 1 : 0 });
     }
@@ -284,7 +299,7 @@
     const grades = [...new Set(R.expRows.map(r => r.grade))].sort();
     const srcs = [...new Set(R.expRows.map(r => r.src))];
     const filt = { bench: f.bench, grade: f.grade, product: f.product, src: f.src };
-    const pv = V.crudeLayering(R, filt, f.dim);
+    const pv = V.crudeLayering(R, filt, f.dim, undefined, WIN());
     const filters = `<div class="filters">
       ${select('Group rows by', 'crude.dim', f.dim, [['pricing', 'Pricing month'], ['prod', 'Production month'], ['bench', 'Benchmark'], ['grade', 'Crude grade / source'], ['src', 'Exposure source'], ['product', 'Product']])}
       ${select('Benchmark', 'crude.bench', f.bench, [['', 'All'], ...benches.map(b => [b, b])])}
@@ -309,7 +324,7 @@
     const list = S.priority.map((c, i) => `<div class="prio"><span class="n">${i + 1}</span><span class="t">${esc(E.PRIORITY_LABELS[c])}</span>
       <span class="btns"><button class="btn sm icon" data-act="prio-up" data-i="${i}" aria-label="Move up"${i === 0 ? ' disabled' : ''}>${I('up')}</button><button class="btn sm icon" data-act="prio-down" data-i="${i}" aria-label="Move down"${i === S.priority.length - 1 ? ' disabled' : ''}>${I('down')}</button></span></div>`).join('');
     const body = `<div class="prio-list">${list}</div>
-      <p class="how" style="margin:12px 0 0">Stock older than the previous month - including opening inventory - is always sold first, oldest first. Changing the order recalculates every page.
+      <p class="how" style="margin:12px 0 0">Stock older than the previous month - opening purchases, and production from before then - is always sold first, oldest first. Opening production from the month before the product data starts counts as "previous month's production". Changing the order recalculates every page.
       Purchases count as 1st half if they arrive on the 1st-15th, 2nd half from the 16th (set by the arrival date or an "Arrival Half" column).</p>`;
     return card('Sales priority', 'Order in which product layers are sold within a month (1 = sold first).', body,
       `<span class="tag ${isDefault ? 'ok' : 'info'}" style="border-radius:999px;padding:2px 9px;font-size:11px;font-weight:600">${isDefault ? 'Default order' : 'Custom order'}</span><button class="btn sm" data-act="prio-reset"${isDefault ? ' disabled' : ''}>${I('reset')} Reset to default</button>`);
@@ -317,9 +332,10 @@
 
   function pageProduct() {
     const R = S.R, f = S.f.prod;
-    const pv = V.productLayering(R, f.product), inv = V.productInventory(R, f.product);
+    const w = WIN();
+    const pv = V.productLayering(R, f.product, w), inv = V.productInventory(R, f.product, w);
     const ser = seriesFromPivot(pv, 'src', false);
-    const sumRows = V.productSummary(R);
+    const sumRows = V.productSummary(R, w);
     const sumTbl = `<div class="tbl-wrap"><table class="m"><thead><tr><th>Product</th><th>Benchmark</th><th>Opening</th><th>Production</th><th>Purchases</th><th>Sales</th><th>Unmet</th><th>Closing</th><th>Closing cover (days)</th></tr></thead><tbody>
       ${sumRows.map(x => `<tr><td>${esc(x.product)}</td><td style="text-align:right">${esc(x.bench)}</td><td>${fmt(x.open)}</td><td>${fmt(x.production)}</td><td>${fmt(x.purchases)}</td><td>${fmt(x.sales)}</td><td class="${x.unmet > 0 ? 'neg' : ''}">${fmt(x.unmet)}</td><td>${fmt(x.close)}</td><td>${x.coverDays == null ? '–' : fmt(x.coverDays)}</td></tr>`).join('')}
       <tr class="tot"><td>Total</td><td></td>${['open', 'production', 'purchases', 'sales', 'unmet', 'close'].map(k => `<td>${fmt(sum(sumRows.map(x => x[k])))}</td>`).join('')}<td></td></tr></tbody></table></div>`;
@@ -333,9 +349,10 @@
 
   function pageMargin() {
     const R = S.R;
-    const mp = V.marginByProduct(R), mb = V.marginByBench(R), cb = V.crudeByBench(R), pp = V.productPricedByBench(R);
+    const w = WIN(), pmw = V.pMonthsInWin(R, w);
+    const mp = V.marginByProduct(R, w), mb = V.marginByBench(R, w), cb = V.crudeByBench(R, w), pp = V.productPricedByBench(R, w);
     const ser = seriesFromPivot(mp, 'product', true);
-    const unmet = E.pivot(R.unmet.map(u => ({ vol: u.vol, p: u.product, m: R.months[u.t] })), r => r.p, r => r.m, { colKeys: R.months });
+    const unmet = E.pivot(R.unmet.map(u => ({ vol: u.vol, p: u.product, m: R.months[u.t] })).filter(u => pmw.includes(u.m)), r => r.p, r => r.m, { colKeys: pmw });
     return `<div class="grid g-main">${card('Margin (crack) exposure', 'Product volume sold in each sales month (kb) - this volume carries crack exposure in that month.', matrix(mp, { rowHdr: 'Product', rowFmt: x => x }), '', true)}
       ${card('Sales by product', '', barChart('c_margin', ser.labels, ser.series, true))}</div>` +
       `<div class="grid g2">${card('By product benchmark', 'Crack exposure grouped by the benchmark each product is priced on.', matrix(mb, { rowHdr: 'Product benchmark', rowFmt: x => x }), '', true)}
@@ -347,7 +364,7 @@
   function pageMonthEnd() {
     const R = S.R, f = S.f.me;
     const benches = [...new Set(R.snaps.flatMap(s => s.map(r => r.bench || 'Unmapped')))].sort();
-    const pv = V.monthEnd(R, f.dim, f.kind, { bench: f.bench });
+    const pv = V.monthEnd(R, f.dim, f.kind, { bench: f.bench }, WIN());
     const ser = seriesFromPivot(pv, f.dim, false);
     const filters = `<div class="filters">
       ${select('Group rows by', 'me.dim', f.dim, [['pricing', 'Pricing month'], ['bench', 'Benchmark'], ['grade', 'Crude grade / source'], ['product', 'Product'], ['kind', 'Inventory type'], ['src', 'Exposure source']])}
@@ -359,18 +376,20 @@
   }
 
   function pageBalances() {
-    const R = S.R;
-    const hdr = `<thead><tr><th>Line</th>${R.months.map(m => `<th>${fm(m)}</th>`).join('')}<th class="tot">Total</th></tr></thead>`;
-    const tbl = (rows, defs, totalFor) => `<div class="tbl-wrap"><table class="m">${hdr}<tbody>${defs.map(([l, k, cls]) => {
+    const R = S.R, w = WIN();
+    const wm = V.winMonths(R, w), pm = V.pMonthsInWin(R, w);
+    const hdrFor = ms => `<thead><tr><th>Line</th>${ms.map(m => `<th>${fm(m)}</th>`).join('')}<th class="tot">Total</th></tr></thead>`;
+    const tbl = (rows, defs, totalFor, ms) => `<div class="tbl-wrap"><table class="m">${hdrFor(ms)}<tbody>${defs.map(([l, k, cls]) => {
       const vals = rows.map(r => r[k]);
       const tot = totalFor.includes(k) ? fmt(sum(vals)) : '';
       return `<tr class="${cls || ''}"><td>${l}</td>${vals.map(v => `<td class="${k === 'unplanned' || k === 'unmet' ? (v > 1e-9 ? 'neg' : 'zero') : v < 1e-9 ? 'zero' : ''}">${fmt(v)}</td>`).join('')}<td class="tot">${tot}</td></tr>`;
     }).join('')}</tbody></table></div>`;
     const cdefs = [['Opening', 'open'], ['+ Receipts', 'receipts'], ['− Consumption (from stock)', 'consumed'], ['Unplanned crude (shortfall)', 'unplanned'], ['Closing', 'close', 'tot']];
     const pdefs = [['Opening', 'open'], ['+ Production', 'production'], ['+ Purchases', 'purchases'], ['− Sales', 'sales'], ['Demand', 'demand'], ['Unmet demand', 'unmet'], ['Closing', 'close', 'tot']];
-    const cr = R.grades.map((g, i) => `<details class="ent"${i === 0 ? ' open' : ''}><summary>${esc(g)} <span style="color:var(--muted-foreground);font-weight:400">· ${esc(R.crudeBench[g] || 'Unmapped')}</span></summary>${tbl(R.crudeBal.filter(b => b.grade === g), cdefs, ['receipts', 'consumed', 'unplanned'])}</details>`).join('');
-    const pr = R.products.map((p, i) => `<details class="ent"${i === 0 ? ' open' : ''}><summary>${esc(p)} <span style="color:var(--muted-foreground);font-weight:400">· ${esc(R.prodBench[p] || 'Unmapped')}</span></summary>${tbl(R.prodBal.filter(b => b.product === p), pdefs, ['production', 'purchases', 'sales', 'demand', 'unmet'])}</details>`).join('');
-    return card('Crude balances', 'kb. Consumption is drawn from stock FIFO; any shortfall is shown separately as unplanned crude.', cr, '', true) + card('Product balances', 'kb.', pr, '', true);
+    const cr = R.grades.map((g, i) => `<details class="ent"${i === 0 ? ' open' : ''}><summary>${esc(g)} <span style="color:var(--muted-foreground);font-weight:400">· ${esc(R.crudeBench[g] || 'Unmapped')}</span></summary>${tbl(R.crudeBal.filter(b => b.grade === g && wm.includes(b.month)), cdefs, ['receipts', 'consumed', 'unplanned'], wm)}</details>`).join('');
+    const pr = R.products.map((p, i) => `<details class="ent"${i === 0 ? ' open' : ''}><summary>${esc(p)} <span style="color:var(--muted-foreground);font-weight:400">· ${esc(R.prodBench[p] || 'Unmapped')}</span></summary>${tbl(R.prodBal.filter(b => b.product === p && pm.includes(b.month)), pdefs, ['production', 'purchases', 'sales', 'demand', 'unmet'], pm)}</details>`).join('');
+    return card('Crude balances', `kb, ${fm(w.start)} to ${fm(w.end)} (display window). Consumption is drawn from stock FIFO; any shortfall is shown separately as unplanned crude. Crude data may start before the product data.`, cr, '', true) +
+      card('Product balances', `kb, from ${fm(pm[0] != null ? pm[0] : R.productStart)}. Product data starts at the first product month; earlier months have crude only.`, pr, '', true);
   }
 
   function checksList(items) {
@@ -387,19 +406,22 @@
 
   function previewTables() {
     const inp = S.input, M = inp.months;
+    const PM = M.filter(m => m >= inp.productStart);   // product data starts later than crude data
     const mh = M.map(m => `<th>${fm(m)}</th>`).join('');
+    const pmh = PM.map(m => `<th>${fm(m)}</th>`).join('');
     const pm = k => k == null ? '–' : fm(k);
     const t = (head, body) => `<div class="tbl-wrap"><table class="m"><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table></div>`;
     const cr = t(`<th>Crude grade</th><th>Benchmark</th>${mh}`, inp.crudes.map(r => `<tr><td>${esc(r.grade)}</td><td>${esc(r.benchmark || '–')}</td>${M.map(m => `<td>${fmt(r.consumption[m] || 0)}</td>`).join('')}</tr>`).join(''));
-    const yl = t(`<th>Product</th><th>Benchmark</th>${mh}`, inp.products.map(r => `<tr><td>${esc(r.product)}</td><td>${esc(r.benchmark || '–')}</td>${M.map(m => `<td>${fmt(r.production[m] || 0, 1)}</td>`).join('')}</tr>`).join(''));
+    const yl = t(`<th>Product</th><th>Benchmark</th>${pmh}`, inp.products.map(r => `<tr><td>${esc(r.product)}</td><td>${esc(r.benchmark || '–')}</td>${PM.map(m => `<td>${fmt(r.production[m] || 0, 1)}</td>`).join('')}</tr>`).join(''));
     const oc = t('<th>Crude grade</th><th>Pricing month</th><th>Volume</th>', inp.openCrude.map(r => `<tr><td>${esc(r.grade)}</td><td>${r.pricing == null ? '<span class="c-amber">not specified</span>' : fm(r.pricing)}</td><td>${fmt(r.volume)}</td></tr>`).join('') || '<tr><td colspan="3" style="text-align:center">None</td></tr>');
-    const op = t('<th>Product</th><th>Pricing month</th><th>Volume</th>', inp.openProducts.map(r => `<tr><td>${esc(r.product)}</td><td>${r.pricing == null ? '<span class="c-amber">not specified</span>' : fm(r.pricing)}</td><td>${fmt(r.volume)}</td></tr>`).join('') || '<tr><td colspan="3" style="text-align:center">None</td></tr>');
+    const srcLabel = x => x === 'Production' ? 'Production' : x === 'Purchase' ? 'Purchase' : 'Opening (priced)';
+    const op = t('<th>Product</th><th>Source</th><th>Month</th><th>Volume</th>', inp.openProducts.map(r => `<tr><td>${esc(r.product)}</td><td>${srcLabel(r.source)}</td><td>${r.month == null ? '<span class="c-amber">not specified</span>' : fm(r.month)}</td><td>${fmt(r.volume)}</td></tr>`).join('') || '<tr><td colspan="4" style="text-align:center">None</td></tr>');
     const im = t('<th>Crude grade</th><th>Arrival</th><th>Pricing</th><th>Volume</th>', inp.crudeImports.map(r => `<tr><td>${esc(r.grade)}</td><td>${fm(r.arrival)}</td><td>${pm(r.pricing)}</td><td>${fmt(r.volume)}</td></tr>`).join(''));
     const pu = t('<th>Product</th><th>Arrival</th><th>Half</th><th>Pricing</th><th>Volume</th>', inp.productPurchases.map(r => `<tr><td>${esc(r.product)}</td><td>${fm(r.arrival)}</td><td>${r.half === 2 ? '2nd half' : '1st half'}</td><td>${pm(r.pricing)}</td><td>${fmt(r.volume)}</td></tr>`).join('') || '<tr><td colspan="5" style="text-align:center">None</td></tr>');
-    const dm = t(`<th>Product</th>${mh}`, inp.demand.map(r => `<tr><td>${esc(r.product)}</td>${M.map(m => `<td>${fmt(r.demand[m] || 0)}</td>`).join('')}</tr>`).join(''));
+    const dm = t(`<th>Product</th>${pmh}`, inp.demand.map(r => `<tr><td>${esc(r.product)}</td>${PM.map(m => `<td>${fmt(r.demand[m] || 0)}</td>`).join('')}</tr>`).join(''));
     const blk = (title, body, open) => `<details class="ent"${open ? ' open' : ''}><summary>${title}</summary>${body}</details>`;
     return card('Loaded inputs', 'As read from your file (kb). Held in memory only.',
-      blk('Crude consumption', cr, true) + blk('Product yield', yl) + blk('Opening crude inventory (with pricing month)', oc) + blk('Opening product inventory (with pricing month)', op) +
+      blk('Crude consumption', cr, true) + blk('Product yield', yl) + blk('Opening crude inventory (by pricing month)', oc) + blk('Opening product inventory (by source and month)', op) +
       blk('Crude imports', im) + blk('Product purchases', pu) + blk('Demand', dm), '', true);
   }
 
@@ -414,13 +436,33 @@
     if (loaded) {
       const inp = S.input;
       loadedCard = card('Session data', `Loaded from ${esc(S.file)}`,
-        `<div class="stat-row"><div><b>${inp.months.length}</b>months (${fm(inp.months[0])} – ${fm(inp.months[inp.months.length - 1])})</div><div><b>${inp.crudes.length}</b>crude grades</div><div><b>${inp.products.length}</b>products</div><div><b>${inp.openCrude.length + inp.openProducts.length}</b>opening layers</div><div><b>${inp.crudeImports.length}</b>crude imports</div><div><b>${inp.productPurchases.length}</b>product purchases</div></div>
+        `<div class="stat-row"><div><b>${inp.months.length}</b>months (${fm(inp.months[0])} – ${fm(inp.months[inp.months.length - 1])})</div><div><b>${fm(inp.productStart)}</b>product data starts</div><div><b>${inp.crudes.length}</b>crude grades</div><div><b>${inp.products.length}</b>products</div><div><b>${inp.openCrude.length + inp.openProducts.length}</b>opening layers</div><div><b>${inp.crudeImports.length}</b>crude imports</div><div><b>${inp.productPurchases.length}</b>product purchases</div></div>
          <div style="display:flex;gap:8px;margin-top:14px;flex-wrap:wrap"><button class="btn primary" data-go="dash">View dashboard</button><button class="btn" data-act="xlsx">${I('download')} Export results (.xlsx)</button><button class="btn" data-act="csv">${I('download')} Export detail (.csv)</button><button class="btn" data-act="clear">${I('trash')} Clear data</button></div>`);
     }
     return priv + card('Load data', 'Required every session. Volumes in thousand barrels (kb).', `<div style="padding-top:2px">${drop}</div>`) + issues + loadedCard + (loaded ? previewTables() : '');
   }
 
-  const RENDER = { dash: pageDash, crude: pageCrude, product: pageProduct, margin: pageMargin, monthend: pageMonthEnd, balances: pageBalances, checks: pageChecks, data: pageData };
+  function pageSettings() {
+    const R = S.R, w = WIN(), last = R.months[R.months.length - 1];
+    const opts = R.months.map(m => [m, fm(m)]);
+    const isDefault = w.start === R.productStart && w.end === last;
+    const isAll = w.start === R.months[0] && w.end === last;
+    const body = `<div class="filters" style="padding:4px 0 0">
+        ${select('Display from', 'win.start', w.start, opts)}${select('Display to', 'win.end', w.end, opts)}
+        <div class="field"><label>Quick ranges</label><div class="seg"><button class="${isDefault ? 'on' : ''}" data-act="win-default">Product horizon</button><button class="${isAll ? 'on' : ''}" data-act="win-all">All months</button></div></div>
+      </div>
+      <div class="stat-row" style="margin-top:14px"><div><b>${fm(R.months[0])} - ${fm(last)}</b>model timeline (crude data from ${fm(R.months[0])})</div><div><b>${fm(R.productStart)}</b>product data starts</div><div><b>${fm(w.start)} - ${fm(w.end)}</b>currently displayed</div></div>
+      <div class="how" style="margin-top:14px"><b>How the window works</b><ol>
+        <li><b>Flow tables</b> (sales-month and production-month axes, percentages, cargo analysis): months before or after the window fold into <b>Earlier months</b> / <b>Later months</b> columns, so totals still tie to the full model.</li>
+        <li><b>Stock tables</b> (month-end exposure, inventory, balances) and the margin tables show only the months inside the window.</li>
+        <li>The dashboard figures and the Excel export follow the window. Calculations always use the whole timeline.</li></ol></div>`;
+    const prio = `<div class="prio-list">${S.priority.map((c, i) => `<div class="prio"><span class="n">${i + 1}</span><span class="t">${esc(E.PRIORITY_LABELS[c])}</span></div>`).join('')}</div>
+      <p class="how" style="margin:12px 0 0">Older stock is always sold first. The order is set on the Product Layering page.</p>`;
+    return card('Display months', 'Choose the first and last month to show. Defaults to the product horizon, so crude-only months before it are folded away.', body) +
+      card('Sales priority (current order)', '', prio, `<button class="btn sm" data-go="product">Edit on Product Layering</button>`);
+  }
+
+  const RENDER = { settings: pageSettings, dash: pageDash, crude: pageCrude, product: pageProduct, margin: pageMargin, monthend: pageMonthEnd, balances: pageBalances, checks: pageChecks, data: pageData };
 
   // ---------- render ----------
   function renderNav() {
@@ -434,6 +476,9 @@
     $('#stateDot').className = 'dot' + (S.R ? ' on' : '');
     $('#stateTxt').textContent = S.R ? `${S.file} · ${S.R.months.length} months` : 'No data loaded';
     $('#exportTop').disabled = !S.R;
+    const pill = $('#winPill');
+    if (S.R) { const w = WIN(); pill.innerHTML = I('cal') + `Display ${fm(w.start)} - ${fm(w.end)}`; pill.style.display = 'inline-flex'; }
+    else pill.style.display = 'none';
   }
   function render() {
     const y = window.scrollY;
@@ -461,7 +506,7 @@
     S.issues = res.issues;
     if (!res.ok) { S.R = null; S.input = null; S.file = ''; go('data'); return; }
     try {
-      S.input = res.input; S.file = name; rerun();
+      S.input = res.input; S.file = name; S.win = null; rerun();
       S.f.dash.month = null;
       go('dash');
     } catch (e) { console.error(e); S.R = null; S.issues.push({ level: 'error', msg: 'Calculation failed: ' + e.message }); go('data'); }
@@ -477,11 +522,18 @@
     };
     rd.readAsArrayBuffer(file);
   }
-  function clearData() { S.R = null; S.input = null; S.issues = []; S.file = ''; go('data'); }
+  function clearData() { S.R = null; S.input = null; S.issues = []; S.file = ''; S.win = null; go('data'); }
 
   // ---------- events ----------
   function setPath(path, val) {
-    const [a, b] = path.split('.'); const m = { crude: S.f.crude, prod: S.f.prod, me: S.f.me, dash: S.f.dash, pct: S.f.pct, cargo: S.f.cargo }[a];
+    const [a, b] = path.split('.');
+    if (a === 'win') {   // display window: keep start <= end
+      const cur = WIN(), v = +val;
+      S.win = { start: cur.start, end: cur.end }; S.win[b] = v;
+      if (S.win.start > S.win.end) { if (b === 'start') S.win.end = v; else S.win.start = v; }
+      return;
+    }
+    const m = { crude: S.f.crude, prod: S.f.prod, me: S.f.me, dash: S.f.dash, pct: S.f.pct, cargo: S.f.cargo }[a];
     if (a === 'dash' && b === 'month') val = +val;
     if (a === 'cargo' && b === 'cargoId') val = val === '' ? '' : +val;
     m[b] = val;
@@ -500,7 +552,9 @@
     }
     else if (a === 'prio-reset') { S.priority = E.DEFAULT_PRIORITY.slice(); rerun(); render(); }
     else if (a === 'template') Export.downloadTemplate();
-    else if (a === 'xlsx') Export.downloadXlsx(S.R);
+    else if (a === 'win-default') { S.win = null; render(); }
+    else if (a === 'win-all') { S.win = { start: S.R.months[0], end: S.R.months[S.R.months.length - 1] }; render(); }
+    else if (a === 'xlsx') Export.downloadXlsx(S.R, WIN());
     else if (a === 'csv') Export.downloadCsv(S.R);
     else if (a === 'clear') clearData();
   });
@@ -527,7 +581,7 @@
   $('#theme').addEventListener('click', () => { setTheme(document.documentElement.getAttribute('data-theme') === 'dark' ? 'light' : 'dark'); render(); });
   $('#collapse').addEventListener('click', () => $('#app').classList.toggle('collapsed'));
   $('#menuBtn').addEventListener('click', () => $('#app').classList.toggle('mobile-open'));
-  $('#exportTop').addEventListener('click', () => { if (S.R) Export.downloadXlsx(S.R); });
+  $('#exportTop').addEventListener('click', () => { if (S.R) Export.downloadXlsx(S.R, WIN()); });
 
   const si = $('#search'), sr = $('#searchRes');
   function showSearch() {

@@ -72,12 +72,15 @@
   function roleOf(header) {
     if (typeof header === 'string') {
       const h = header.trim().toLowerCase();
+      if (/^(source|origin)/.test(h)) return 'source';
+      if (/^(month|date)$/.test(h)) return 'monthcol';
       if (/benchmark|price\s*ref|index/.test(h)) return 'benchmark';
       if (/half|\b[12]h\b/.test(h)) return 'half';
       if (/pric/.test(h)) return 'pricing';
       if (/arriv|receipt|deliver/.test(h)) return 'arrival';
       if (/begin|opening|open\b/.test(h)) return 'open';
       if (/vol|qty|quantity|kb/.test(h)) return 'volume';
+      if (/month|date/.test(h)) return 'monthcol';
     }
     return monthKey(header) !== null ? 'month' : null;
   }
@@ -161,15 +164,16 @@
       return k;
     };
 
-    const input = { months: [], crudes: [], products: [], openCrude: [], openProducts: [], crudeImports: [], productPurchases: [], demand: [] };
-    const allMonths = new Set();
+    const input = { months: [], productStart: null, crudes: [], products: [], openCrude: [], openProducts: [], crudeImports: [], productPurchases: [], demand: [] };
+    // Crude data may start earlier than product data (opening product can come from older production months).
+    const crudeMonths = new Set(), productMonths = new Set();
 
     // --- consumption / yield: month grid (+ legacy beginning-inventory columns) ---
     const grid = (id, title, key, nameKey, valKey, openKey, listKey) => {
       if (!need(id, true)) return;
       const b = blocks[id], bm = colBy(b, 'benchmark'), op = colBy(b, 'open'), mc = monthCols(b);
       if (!mc.length) err(`${where(id)}: no month columns found in the header row.`);
-      mc.forEach(m => allMonths.add(m.k));
+      mc.forEach(m => (id === 'crude' ? crudeMonths : productMonths).add(m.k));
       if (op && !colBy(b, 'pricing')) warn(`${where(id)}: has a beginning-inventory column but no "Pricing Month" column. Use the separate opening-inventory worksheet, which states the pricing month of each opening layer.`);
       b.rows.forEach(r => {
         const vals = {};
@@ -178,7 +182,12 @@
         input[key].push({ [nameKey]: r.label, benchmark: bench, [valKey]: vals });
         if (op) {
           const ov = num(r.row[op.c], `${where(id)}, ${r.label}, beginning inventory`);
-          if (ov > 0) input[listKey].push({ [nameKey]: r.label, benchmark: bench, volume: ov, pricing: pricingCell(b, r, `${where(id)}, ${r.label}`) });
+          if (ov > 0) {
+            const pk = pricingCell(b, r, `${where(id)}, ${r.label}`);
+            input[listKey].push(listKey === 'openProducts'
+              ? { product: r.label, benchmark: bench, volume: ov, source: 'Opening', month: pk }
+              : { [nameKey]: r.label, benchmark: bench, volume: ov, pricing: pk });
+          }
         }
       });
     };
@@ -186,24 +195,51 @@
     grid('yield', 'Product Yield', 'products', 'product', 'production', 'open', 'openProducts');
 
     // --- opening inventory sheets ---
-    const opening = (id, nameKey, listKey, what) => {
-      if (!need(id, false)) { warn(`No "${BLOCK_NAMES[id]}" worksheet found - opening ${what} inventory assumed to be zero.`); return; }
-      const b = blocks[id], bm = colBy(b, 'benchmark'), vo = colBy(b, 'volume') || colBy(b, 'open');
-      if (!vo) { err(`${where(id)}: needs a "Volume" column.`); return; }
-      if (!colBy(b, 'pricing')) err(`${where(id)}: needs a "Pricing Month" column - every opening layer must state its pricing month.`);
-      b.rows.forEach(r => {
-        const v = num(r.row[vo.c], `${where(id)}, ${r.label}, volume`);
-        if (v > 0) input[listKey].push({ [nameKey]: r.label, benchmark: bm ? str(r.row[bm.c]) : '', volume: v, pricing: pricingCell(b, r, `${where(id)}, ${r.label}`) });
-      });
-    };
-    opening('openCrude', 'grade', 'openCrude', 'crude');
-    opening('openProd', 'product', 'openProducts', 'product');
+    // Opening crude: stock at the start of the crude data, one row per pricing month.
+    if (!need('openCrude', false)) warn(`No "Opening Crude" worksheet found - opening crude inventory assumed to be zero.`);
+    else {
+      const id = 'openCrude', b = blocks[id], bm = colBy(b, 'benchmark'), vo = colBy(b, 'volume') || colBy(b, 'open');
+      if (!vo) err(`${where(id)}: needs a "Volume" column.`);
+      else {
+        if (!colBy(b, 'pricing')) err(`${where(id)}: needs a "Pricing Month" column - every opening layer must state its pricing month.`);
+        b.rows.forEach(r => {
+          const v = num(r.row[vo.c], `${where(id)}, ${r.label}, volume`);
+          if (v > 0) input.openCrude.push({ grade: r.label, benchmark: bm ? str(r.row[bm.c]) : '', volume: v, pricing: pricingCell(b, r, `${where(id)}, ${r.label}`) });
+        });
+      }
+    }
+    // Opening product: stock at the start of the first product month. Source = Production (month = production month)
+    // or Purchase (month = pricing month). Without a Source column each row is read as stock priced in that month.
+    if (!need('openProd', false)) warn(`No "Opening Product" worksheet found - opening product inventory assumed to be zero.`);
+    else {
+      const id = 'openProd', b = blocks[id], bm = colBy(b, 'benchmark'), vo = colBy(b, 'volume') || colBy(b, 'open'), so = colBy(b, 'source');
+      const mcol = colBy(b, 'monthcol') || colBy(b, 'pricing');
+      if (!vo) err(`${where(id)}: needs a "Volume" column.`);
+      else if (!mcol) err(`${where(id)}: needs a "Month" column (production month for Production rows, pricing month for Purchase rows).`);
+      else {
+        if (!so) warn(`${where(id)}: no "Source" column - rows are read as stock priced in the given month. Add Source = Purchase or Production.`);
+        b.rows.forEach(r => {
+          const v = num(r.row[vo.c], `${where(id)}, ${r.label}, volume`);
+          if (!(v > 0)) return;
+          let source = 'Opening';
+          if (so) {
+            const s = str(r.row[so.c]).toLowerCase();
+            if (/^purch|^import|^buy|^bought/.test(s)) source = 'Purchase';
+            else if (/^prod|^refin|^made/.test(s)) source = 'Production';
+            else { err(`${where(id)}, ${r.label}: Source "${r.row[so.c]}" not recognised - use Purchase or Production.`); return; }
+          }
+          let month = null;
+          if (!isBlank(r.row[mcol.c])) { month = monthKey(r.row[mcol.c]); if (month === null) warn(`${where(id)}, ${r.label}: month "${r.row[mcol.c]}" not recognised.`); }
+          input.openProducts.push({ product: r.label, benchmark: bm ? str(r.row[bm.c]) : '', volume: v, source, month });
+        });
+      }
+    }
 
     // --- demand ---
     if (need('demand', true)) {
       const b = blocks.demand, mc = monthCols(b);
       if (!mc.length) err(`${where('demand')}: no month columns found in the header row.`);
-      mc.forEach(m => allMonths.add(m.k));
+      mc.forEach(m => productMonths.add(m.k));
       b.rows.forEach(r => {
         const d = {};
         mc.forEach(m => { const v = num(r.row[m.c], `${where('demand')}, ${r.label}, ${fmtKey(m.k)}`); if (v) d[m.k] = v; });
@@ -234,11 +270,16 @@
     flows('crudeImports', 'grade', 'crudeImports', false);
     flows('prodPurch', 'product', 'productPurchases', true);
 
-    // --- horizon: every month first..last, no gaps ---
+    // --- timeline: earliest crude month .. last month, no gaps; product data starts at its own first month ---
+    const allMonths = new Set([...crudeMonths, ...productMonths]);
     if (allMonths.size) {
       const ks = [...allMonths].sort((a, b) => a - b);
       for (let k = ks[0]; k <= ks[ks.length - 1]; k++) input.months.push(k);
-      if (input.months.length !== ks.length) warn('Month columns have gaps; missing months are included in the horizon with zero values.');
+      if (input.months.length !== ks.length) warn('Month columns have gaps; missing months are included in the timeline with zero values.');
+    }
+    if (productMonths.size) {
+      input.productStart = Math.min(...productMonths);
+      if (crudeMonths.size && Math.min(...crudeMonths) > input.productStart) warn(`Crude data starts ${fmtKey(Math.min(...crudeMonths))}, after the first product month (${fmtKey(input.productStart)}). Opening product made before the crude data cannot be traced to crude pricing months.`);
     }
 
     const dup = (arr, key, what) => {

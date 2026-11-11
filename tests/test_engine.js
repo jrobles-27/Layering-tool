@@ -3,13 +3,13 @@ const assert = require('assert');
 const E = require('../js/engine.js');
 const P = require('../js/parse.js');
 const D = require('../js/demo.js');
+const V = require('../js/views.js');
 
 let n = 0;
 const ok = (c, m) => { assert.ok(c, m); n++; };
 const near = (a, b, m, tol = 1e-6) => { assert.ok(Math.abs(a - b) <= tol, `${m}: ${a} vs ${b}`); n++; };
 const sum = a => a.reduce((s, x) => s + x, 0);
 const k = (y, m) => y * 12 + m;
-const serial = (y, m, d) => Math.round(Date.UTC(y, m, d || 1) / 86400000 + 25569);
 
 // ---------- 1. parse the multi-sheet demo ----------
 const sheets = D.buildDemoSheets().map(s => ({ name: s.name, aoa: s.aoa }));
@@ -18,27 +18,31 @@ const parsed = P.parseSheets(sheets);
 ok(parsed.ok, 'demo parses without errors: ' + JSON.stringify(parsed.issues));
 ok(parsed.issues.length === 0, 'no parse notes on the demo: ' + JSON.stringify(parsed.issues));
 const inp = parsed.input;
-ok(inp.months.length === 6, 'six months');
+ok(inp.months.length === 10 && inp.months[0] === k(2026, 8), 'timeline starts with the earliest crude month (Sep-26)');
+ok(inp.productStart === k(2027, 0), 'product data starts Jan-27, later than crude');
 ok(inp.crudes.length === 4 && inp.products.length === 6 && inp.demand.length === 6, 'row counts');
-ok(inp.openCrude.length === 4 && inp.openProducts.length === 8, 'opening layers (multiple pricing months per product allowed)');
-ok(inp.crudeImports.length === 21 && inp.productPurchases.length === 3, 'import counts');
-ok(inp.openCrude[0].pricing === P.monthKey('Dec-26'), 'opening pricing month parsed');
+ok(inp.openCrude.length === 5, 'opening crude layers (a grade may have several pricing months)');
+ok(inp.openProducts.length === 14, 'opening product rows');
+ok(inp.openProducts.filter(r => r.source === 'Production').length === 12 && inp.openProducts.filter(r => r.source === 'Purchase').length === 2, 'opening product Source parsed');
+ok(inp.crudeImports.length === 36 && inp.productPurchases.length === 3, 'import counts');
+ok(inp.openCrude[0].pricing === P.monthKey('Jul-26'), 'opening crude pricing month parsed');
+ok(inp.openProducts[0].month === P.monthKey('Oct-26'), 'opening product month parsed');
 ok(inp.productPurchases.map(p => p.half).join() === '1,2,1', 'arrival half taken from the arrival date (5th, 22nd, 10th)');
 ok(P.monthKey(46327) === 2026 * 12 + 10, 'excel serial 46327 = Nov-26');
 ok(P.monthKey('Nov 2026') === 2026 * 12 + 10 && P.monthKey('2026-11') === 2026 * 12 + 10 && P.monthKey('20-Jan-27') === 2027 * 12, 'text months');
 
-// sheet names are matched by keyword, order does not matter
 const shuffled = sheets.slice().reverse().map(s => ({ ...s, name: s.name.toLowerCase() }));
 ok(JSON.stringify(P.parseSheets(shuffled).input) === JSON.stringify(inp), 'sheet order / case do not matter');
-// missing sheets are reported
 const noDemand = P.parseSheets(sheets.filter(s => s.name !== 'Demand'));
 ok(!noDemand.ok && noDemand.issues.some(i => /Demand/.test(i.msg)), 'missing Demand sheet is an error');
 const noOpen = P.parseSheets(sheets.filter(s => !/^Opening/.test(s.name)));
-ok(noOpen.ok && noOpen.issues.some(i => i.level === 'warn' && /Opening Crude/.test(i.msg)), 'missing opening sheets warn (zero assumed)');
-// opening sheet without a pricing month column is an error
-const badOpen = P.parseSheets(sheets.map(s => s.name === 'Opening Product' ? { name: s.name, aoa: s.aoa.map(r => [r[0], r[2]]) } : s));
-ok(!badOpen.ok && badOpen.issues.some(i => /Pricing Month/.test(i.msg)), 'opening sheet needs a pricing month column');
-// explicit "Arrival Half" column overrides the date
+ok(noOpen.ok && noOpen.issues.some(i => i.level === 'warn' && /Opening Crude/.test(i.msg)) && noOpen.issues.some(i => i.level === 'warn' && /Opening Product/.test(i.msg)), 'missing opening sheets warn (zero assumed)');
+const noMonthCol = P.parseSheets(sheets.map(s => s.name === 'Opening Product' ? { name: s.name, aoa: s.aoa.map(r => [r[0], r[1], r[3]]) } : s));
+ok(!noMonthCol.ok && noMonthCol.issues.some(i => /Month/.test(i.msg)), 'Opening Product needs a Month column');
+const badSource = P.parseSheets(sheets.map(s => s.name === 'Opening Product' ? { name: s.name, aoa: s.aoa.map((r, i) => i === 1 ? [r[0], 'Mystery', r[2], r[3]] : r) } : s));
+ok(!badSource.ok && badSource.issues.some(i => /Source/.test(i.msg)), 'unknown Source is an error');
+const noSource = P.parseSheets(sheets.map(s => s.name === 'Opening Product' ? { name: s.name, aoa: s.aoa.map(r => [r[0], r[2], r[3]]) } : s));
+ok(noSource.ok && noSource.issues.some(i => /Source/.test(i.msg)) && noSource.input.openProducts.every(r => r.source === 'Opening'), 'no Source column: warned, read as stock priced in that month');
 const pp = sheets.find(s => s.name === 'Product Purchases');
 const withHalf = P.parseSheets(sheets.map(s => s === pp ? { name: s.name, aoa: s.aoa.map((r, i) => i === 0 ? [...r, 'Arrival Half'] : [...r, i === 1 ? '2H' : '']) } : s));
 ok(withHalf.input.productPurchases[0].half === 2 && withHalf.input.productPurchases[1].half === 2, 'Arrival Half column overrides the date');
@@ -47,6 +51,9 @@ ok(withHalf.input.productPurchases[0].half === 2 && withHalf.input.productPurcha
 const R = E.run(inp);
 const s = R.summary;
 ok(R.priority.join() === E.DEFAULT_PRIORITY.join(), 'default priority applied');
+ok(R.months.length === 10 && R.pStart === 4 && R.productStart === k(2027, 0), 'timeline: 10 months, product horizon from index 4');
+ok(R.prodBal.every(b => b.t >= R.pStart) && R.crudeBal.some(b => b.t === 0), 'product balances start with the product horizon, crude balances with the crude data');
+ok(R.snaps.slice(0, R.pStart).every(sn => sn.every(r => r.kind === 'Crude inventory')), 'before the product horizon only crude is in stock');
 near(s.totalConsumed, sum(inp.crudes.map(c => sum(Object.values(c.consumption)))), 'total consumption');
 const supply = sum(inp.openCrude.map(c => c.volume)) + sum(inp.crudeImports.map(i => i.volume));
 near(supply + s.totalShort - s.totalConsumed, s.endCrude, 'crude balance closes');
@@ -68,15 +75,27 @@ R.crudeBal.forEach(b => near(b.open + b.receipts - b.consumed, b.close, `crude b
 const pv = E.pivot(soldRows, r => r.pricing, r => r.sale);
 near(pv.total, s.totalSold, 'pivot total');
 
-// opening layers are labelled with their pricing month, oldest pricing month sold first
-ok(R.layerOrder.includes('Opening inventory (priced Nov-26)') && R.layerOrder.includes('Opening inventory (priced Dec-26)'), 'opening layers state their pricing month');
-ok(!R.layerOrder.some(l => l === 'Opening inventory'), 'no vague "Opening inventory" label');
-const gas = R.sales.filter(x => x.product === 'Gasoline 92' && x.sale === R.months[0]);
-ok(gas[0].layer === 'Opening inventory (priced Nov-26)' && gas[1].layer === 'Opening inventory (priced Dec-26)', 'opening layers sold oldest pricing month first');
+// opening product: labelled by source and month; production is traced to the crude of THAT month
+ok(R.layerOrder.includes('Prod Oct-26 (opening stock)') && R.layerOrder.includes('Opening purchase (priced Nov-26)'), 'opening layers state source and month');
+ok(!R.layerOrder.includes('Opening inventory'), 'no vague "Opening inventory" label');
+const openProdVol = sum(inp.openProducts.filter(r => r.source === 'Production').map(r => r.volume));
+const octRows = R.expRows.filter(r => r.layer === 'Prod Oct-26 (opening stock)' && r.product === 'Gasoline 92');
+near(sum(octRows.map(r => r.vol)), 100, 'Gasoline opening production Oct-26 fully traced (sold + unsold)');
+ok(octRows.every(r => r.pricing !== E.PRE && r.pricing !== E.UNPLANNED && r.pricing <= k(2026, 9)), 'traced to crude priced before Oct-26 consumption');
+ok(octRows.every(r => r.prodKey === k(2026, 9) && r.cargoId >= 0), 'production month and cargo recorded for opening production');
+// the Oct-26 crude blend: shares equal Oct consumption by cargo
+const octUse = R.cargoUse.filter(u => u.month === k(2026, 9)), octC = sum(octUse.map(u => u.vol));
+octUse.forEach(u => near(sum(octRows.filter(r => r.cargoId === u.cargoId).map(r => r.vol)) / 100, u.vol / octC, 'opening production carries the Oct-26 crude blend of cargo ' + u.cargoId, 1e-9));
+// sales order in the first product month: older opening production first, then the priority order
+const gas = R.sales.filter(x => x.product === 'Gasoline 92' && x.sale === R.productStart);
+ok(gas[0].layer === 'Prod Oct-26 (opening stock)' && gas[1].layer === 'Prod Nov-26 (opening stock)' && gas[2].layer === 'Prod Dec-26 (opening stock)', 'opening production sold oldest first; Dec-26 counts as previous month production: ' + gas.map(x => x.layer).join(' > '));
 soldRows.forEach(r => { if (r.pricing !== E.PRE && r.pricing !== E.UNPLANNED && r.src === 'Crude') ok(r.pricing <= r.sale, 'pricing not after sale'); });
 ok(R.shortfalls.length > 0 && R.unmet.length > 0, 'demo has a shortfall and unmet demand');
+ok(R.shortfalls.every(x => x.t >= R.pStart), 'demo shortfall is in the product horizon only');
 ok(R.checks.some(c => /Yield does not match/.test(c.title)), 'mass-balance warning');
-ok(s.waAge > 0 && s.waAge < 6, 'weighted-average age plausible: ' + s.waAge);
+ok(!R.checks.some(c => /cannot be traced/.test(c.title)), 'demo opening production is fully traceable');
+ok(s.waAge > 0 && s.waAge < 8, 'weighted-average age plausible: ' + s.waAge);
+ok(s.peakMonth >= R.productStart, 'peak exposure is within the product horizon');
 
 // ---------- 3. hand-checked mini case: crude FIFO + tracing ----------
 const mini = {
@@ -96,10 +115,55 @@ near(mp.get(k(2027, 0), k(2027, 1)), 24, 'mini: Jan-priced sold in Feb');
 near(sum(M.expRows.filter(r => r.stage === 'Unsold product').map(r => r.vol)), 60, 'mini: unsold product at end');
 near(M.summary.endCrude, 40, 'mini: 40 kb Jan-priced crude left');
 
+// ---------- 3b. hand-checked: opening product from earlier production / purchase, crude earlier than product ----------
+// Crude Oct..Dec-26, product from Dec-26. Crude A: open 150 priced Aug; import arriving Nov priced Oct (150).
+//  Oct: 100 from Aug layer. Nov: 50 Aug + 50 Oct-priced. Dec: 100 Oct-priced.
+// Opening product (start of Dec): produced Oct 40, produced Nov 60, bought (priced Sep) 20. Dec production 100. Demand Dec 80.
+const kO = k(2026, 9), kN = k(2026, 10), kD = k(2026, 11);
+const early = E.run({
+  months: [kO, kN, kD], productStart: kD,
+  crudes: [{ grade: 'A', benchmark: 'B', consumption: { [kO]: 100, [kN]: 100, [kD]: 100 } }],
+  products: [{ product: 'P', benchmark: 'C', production: { [kD]: 100 } }],
+  openCrude: [{ grade: 'A', benchmark: 'B', volume: 150, pricing: k(2026, 7) }],
+  openProducts: [
+    { product: 'P', benchmark: 'C', volume: 40, source: 'Production', month: kO },
+    { product: 'P', benchmark: 'C', volume: 60, source: 'Production', month: kN },
+    { product: 'P', benchmark: 'C', volume: 20, source: 'Purchase', month: k(2026, 8) }
+  ],
+  crudeImports: [{ grade: 'A', arrival: kN, pricing: kO, volume: 150, benchmark: '' }],
+  productPurchases: [], demand: [{ product: 'P', demand: { [kD]: 80 } }]
+});
+ok(early.pStart === 2 && early.prodBal.length === 1 && early.prodBal[0].open === 120, 'product horizon starts Dec; opening stock 120 kb');
+// sale order Dec: opening purchase (old), Oct production (old, d=2), then Nov production (previous month's production) -> 20 + 40 + 20
+ok(early.sales.filter(x => x.sale === kD && x.vol > 1e-9).map(x => `${x.layer}=${Math.round(x.vol)}`).join('; ') === 'Opening purchase (priced Sep-26)=20; Prod Oct-26 (opening stock)=40; Prod Nov-26 (opening stock)=20',
+  'early-production sale order: ' + early.sales.filter(x => x.sale === kD && x.vol > 1e-9).map(x => `${x.layer}=${Math.round(x.vol)}`).join('; '));
+const ep = E.pivot(early.expRows.filter(r => r.stage === 'Sold'), r => r.pricing, r => r.sale);
+near(ep.get(k(2026, 7), kD), 50, 'early: Aug-priced crude sold in Dec = 40 (Oct prod) + 10 (Nov prod)');
+near(ep.get(kO, kD), 10, 'early: Oct-priced crude sold in Dec = 10 (Nov prod)');
+near(ep.get(k(2026, 8), kD), 20, 'early: purchase priced Sep sold in Dec = 20');
+const eu = E.pivot(early.expRows.filter(r => r.stage === 'Unsold product'), r => r.pricing, r => r.sale);
+near(eu.get(k(2026, 7), E.END), 20, 'early: unsold Nov production, Aug-priced share = 20');
+near(eu.get(kO, E.END), 120, 'early: unsold = 20 (Nov prod) + 100 (Dec prod), Oct-priced');
+near(early.summary.totalSold, 80, 'early: sold 80');
+// production-month dimension for the opening production
+const epd = E.pivot(early.expRows.filter(r => r.stage === 'Sold'), r => r.prodKey, r => r.sale);
+near(epd.get(kO, kD), 40, 'early: sold from Oct production = 40');
+near(epd.get(kN, kD), 20, 'early: sold from Nov production = 20');
+near(epd.get('Purchased product', kD), 20, 'early: sold from purchased stock = 20');
+ok(early.snaps[0].every(r => r.kind === 'Crude inventory') && early.snaps[1].every(r => r.kind === 'Crude inventory'), 'Oct/Nov month-ends are crude only');
+// production that cannot be traced (no crude data for that month) is flagged, not silently dropped
+const untraced = E.run({
+  months: [kD], productStart: kD,
+  crudes: [{ grade: 'A', benchmark: 'B', consumption: { [kD]: 100 } }], products: [{ product: 'P', benchmark: 'C', production: { [kD]: 100 } }],
+  openCrude: [{ grade: 'A', benchmark: 'B', volume: 100, pricing: kN }],
+  openProducts: [{ product: 'P', benchmark: 'C', volume: 30, source: 'Production', month: kN }],
+  crudeImports: [], productPurchases: [], demand: [{ product: 'P', demand: { [kD]: 30 } }]
+});
+ok(untraced.checks.some(c => c.level === 'warn' && /cannot be traced/.test(c.title)), 'untraceable opening production is a warning');
+ok(untraced.expRows.filter(r => r.layer === 'Prod Nov-26 (opening stock)').every(r => r.pricing === E.PRE), 'untraceable opening production shows as Pre-horizon');
+near(untraced.summary.totalSold, 30, 'untraceable opening production is still sold');
+
 // ---------- 4. sales priority ----------
-// Product P, Jan..Mar. Crude is plentiful so production = consumption. Layers available in Mar:
-//   Feb production 100, Feb purchase 30, Mar purchase 1st half 50, Mar purchase 2nd half 40, Mar production 100.
-// Jan has no demand, so Jan production (100) is "old stock" in Mar and is always sold first.
 const kJ = k(2027, 0), kF = k(2027, 1), kM = k(2027, 2);
 function prioCase(demandMar, priority) {
   return E.run({
@@ -117,27 +181,21 @@ function prioCase(demandMar, priority) {
   }, priority ? { priority } : undefined);
 }
 const marSales = r => r.sales.filter(x => x.sale === kM && x.vol > 1e-9).map(x => `${x.layer}=${Math.round(x.vol)}`).join('; ');
-// total supply in Mar = 100 (Jan prod) + 100 (Feb prod) + 30 + 50 + 40 + 100 = 420
 let r1 = prioCase(300);
 ok(marSales(r1) === 'Prod Jan-27=100; Prod Feb-27=100; Purchase Feb-27 (1st half)=30; Purchase Mar-27 (1st half)=50; Prod Mar-27=20',
   'default order: old stock, prev production, prev imports, current 1st-half imports, current production: ' + marSales(r1));
 r1 = prioCase(400);
 ok(marSales(r1) === 'Prod Jan-27=100; Prod Feb-27=100; Purchase Feb-27 (1st half)=30; Purchase Mar-27 (1st half)=50; Prod Mar-27=100; Purchase Mar-27 (2nd half)=20',
   'default order: 2nd-half imports come last: ' + marSales(r1));
-// swap current production ahead of 1st-half imports (4 vs 3)
 r1 = prioCase(300, ['prevProd', 'prevImp', 'curProd', 'curImp1', 'curImp2']);
 ok(marSales(r1) === 'Prod Jan-27=100; Prod Feb-27=100; Purchase Feb-27 (1st half)=30; Prod Mar-27=70',
   '4 before 3: current production sold before current 1st-half imports: ' + marSales(r1));
-// second-half imports ahead of current production (5 vs 4)
 r1 = prioCase(400, ['prevProd', 'prevImp', 'curImp1', 'curImp2', 'curProd']);
 ok(marSales(r1) === 'Prod Jan-27=100; Prod Feb-27=100; Purchase Feb-27 (1st half)=30; Purchase Mar-27 (1st half)=50; Purchase Mar-27 (2nd half)=40; Prod Mar-27=80',
   '5 before 4: ' + marSales(r1));
-// previous imports ahead of previous production (2 vs 1)
 r1 = prioCase(150, ['prevImp', 'prevProd', 'curImp1', 'curProd', 'curImp2']);
 ok(marSales(r1) === 'Prod Jan-27=100; Purchase Feb-27 (1st half)=30; Prod Feb-27=20', '2 before 1 (old stock still first): ' + marSales(r1));
-// invalid priority falls back to default
 ok(prioCase(10, ['x']).priority.join() === E.DEFAULT_PRIORITY.join(), 'invalid priority ignored');
-// priority only changes WHICH layer is sold, never the totals
 const a1 = prioCase(300), a2 = prioCase(300, ['curImp2', 'curProd', 'curImp1', 'prevImp', 'prevProd']);
 near(a1.summary.totalSold, a2.summary.totalSold, 'priority does not change total sold');
 near(a1.summary.endProd, a2.summary.endProd, 'priority does not change ending stock');
@@ -153,7 +211,7 @@ const legacy = P.parseAoa([
 ]);
 ok(legacy.ok, 'legacy layout parses: ' + JSON.stringify(legacy.issues));
 ok(legacy.input.months.length === 2 && legacy.input.crudes.length === 1 && legacy.input.demand.length === 1, 'legacy shapes');
-ok(legacy.input.openCrude.length === 1 && legacy.input.openProducts.length === 1, 'legacy beginning-inventory columns become opening layers');
+ok(legacy.input.openCrude.length === 1 && legacy.input.openProducts.length === 1 && legacy.input.openProducts[0].source === 'Opening', 'legacy beginning-inventory columns become opening layers');
 ok(legacy.issues.some(i => /Pricing Month/.test(i.msg)), 'legacy beginning inventory without pricing month is flagged');
 const LR = E.run(legacy.input);
 ok(LR.checks.some(c => c.level === 'warn' && /Opening product without pricing month/.test(c.title)), 'opening without pricing month is a warning');
@@ -162,8 +220,6 @@ ok(LR.checks.some(c => /Import without pricing month/.test(c.title)), 'missing i
 near(LR.summary.totalConsumed, 10, 'legacy consumption');
 
 // ---------- 5b. cargo tracing + percentages ----------
-const V = require('../js/views.js');
-// every cargo: consumed (by production month) + not yet consumed == cargo size
 R.cargoes.forEach(c => {
   const used = sum(R.cargoUse.filter(u => u.cargoId === c.id).map(u => u.vol));
   const left = sum(R.expRows.filter(r => r.stage === 'Unconsumed crude' && r.cargoId === c.id).map(r => r.vol));
@@ -171,26 +227,21 @@ R.cargoes.forEach(c => {
 });
 ok(R.cargoes.length === inp.openCrude.length + inp.crudeImports.length + R.shortfalls.length, 'one cargo per layer + one per shortfall');
 ok(new Set(R.cargoes.map(c => c.label)).size === R.cargoes.length, 'cargo labels are unique');
-// crude-linked product rows (sold + unsold) add up to total production
-near(sum(R.expRows.filter(r => r.cargoId != null && r.cargoId >= 0 && (r.stage === 'Sold' || r.stage === 'Unsold product')).map(r => r.vol)), s.totalProduced, 'cargo-traced product == production', 1e-6);
-// cargo x production, cargo x sales and the cargo's own production x sales matrix all agree
+// crude-linked product rows = production in the horizon + traced opening production
+near(sum(R.expRows.filter(r => r.cargoId != null && r.cargoId >= 0 && (r.stage === 'Sold' || r.stage === 'Unsold product')).map(r => r.vol)), s.totalProduced + openProdVol, 'cargo-traced product == production + opening production', 1e-6);
 const cp = V.cargoByProduction(R, {}), cs = V.cargoBySales(R, {});
-near(cp.pv.total, s.totalConsumed + sum(R.expRows.filter(r => r.stage === 'Unconsumed crude').map(r => r.vol)), 'cargo x production total');
-near(cs.pv.total, s.totalProduced + s.endCrude, 'cargo x sales total (product + unconsumed crude)', 1e-6);
+near(cp.pv.total, s.totalConsumed + s.endCrude, 'cargo x production total (consumed + not yet consumed)');
+near(cs.pv.total, s.totalProduced + openProdVol + s.endCrude, 'cargo x sales total (product + unconsumed crude)', 1e-6);
 cs.list.forEach((c, i) => near(V.cargoProdSales(R, {}, c.id).total, cs.pv.rowTotals[i], 'per-cargo prod x sales == its sales row: ' + c.label, 1e-6));
-// filters
 ok(V.cargoFilter(R, { bench: 'Dubai' }).every(c => c.bench === 'Dubai'), 'cargo benchmark filter');
-// percentages
 const pvv = V.crudeLayering(R, {}, 'pricing');
 const prow = V.pct(pvv, 'row'), pcol = V.pct(pvv, 'col'), ptot = V.pct(pvv, 'total');
 prow.rowKeys.forEach((rk, i) => { if (pvv.rowTotals[i] > 1e-9) near(sum(prow.colKeys.map(ck => prow.get(rk, ck))), 100, 'row % sums to 100', 1e-6); });
 pcol.colKeys.forEach((ck, j) => { if (pvv.colTotals[j] > 1e-9) near(sum(pcol.rowKeys.map(rk => pcol.get(rk, ck))), 100, 'col % sums to 100', 1e-6); });
 near(sum(ptot.rowKeys.flatMap(rk => ptot.colKeys.map(ck => ptot.get(rk, ck)))), 100, 'grand % sums to 100', 1e-6);
-// production-month dimension
 const pdim = V.crudeLayering(R, {}, 'prod', 'sale');
 near(pdim.total, pvv.total, 'prod x sale total == pricing x sale total');
-ok(pdim.rowKeys.includes('Opening stock') && pdim.rowKeys.includes(R.months[0]), 'production-month rows include opening stock and months');
-// hand-checked cargo case (reuses the mini scenario)
+ok(pdim.rowKeys.includes('Purchased product') && pdim.rowKeys.includes(R.productStart) && pdim.rowKeys.includes(E.EARLIER), 'production-month rows: months, earlier-months bucket, purchased product');
 const cg = M.cargoes.find(c => c.src === 'Opening'), ci = M.cargoes.find(c => c.src === 'Import');
 const op = V.cargoProdSales(M, {}, cg.id), im2 = V.cargoProdSales(M, {}, ci.id);
 near(op.get(k(2027, 0), k(2027, 0)), 20, 'cargo A(opening): produced Jan, sold Jan = 20');
@@ -202,6 +253,33 @@ near(im2.get(k(2027, 1), E.END), 36, 'import cargo: produced Feb, unsold = 36');
 const mcp = V.cargoByProduction(M, {});
 near(mcp.pv.get(ci.id, 'Not yet consumed'), 40, 'import cargo: 40 not yet consumed');
 near(mcp.pv.get(cg.id, k(2027, 0)), 60, 'opening cargo: 60 consumed in Jan');
+
+// ---------- 5c. display window ----------
+const def = V.resolveWin(R, undefined);
+ok(def.start === R.productStart && def.end === R.months[9], 'default window = product horizon');
+const full = { start: R.months[0], end: R.months[9] }, mid = { start: k(2027, 2), end: k(2027, 4) };
+// flow tables: months outside the window fold into Earlier / Later, totals never change
+['sale', 'prod'].forEach(cd => {
+  const a = V.crudeLayering(R, {}, 'pricing', cd, full), b = V.crudeLayering(R, {}, 'pricing', cd, mid), c = V.crudeLayering(R, {}, 'pricing', cd);
+  near(a.total, b.total, `window does not change the ${cd}-axis total (full vs narrow)`); near(a.total, c.total, `... nor default`);
+});
+const nb = V.crudeLayering(R, {}, 'pricing', 'sale', mid);
+ok(nb.colKeys.filter(c => typeof c === 'number').join() === [k(2027, 2), k(2027, 3), k(2027, 4)].join(), 'narrow window shows only its months');
+near(nb.colTotals[nb.colKeys.indexOf(E.EARLIER)], sum(soldRows.filter(r => r.sale < k(2027, 2)).map(r => r.vol)), 'Earlier-months bucket = sales before the window');
+near(nb.colTotals[nb.colKeys.indexOf(E.LATER)], sum(soldRows.filter(r => r.sale > k(2027, 4)).map(r => r.vol)), 'Later-months bucket = sales after the window');
+const wideProd = V.crudeLayering(R, {}, 'pricing', 'prod', full);
+ok(wideProd.colKeys.filter(c => typeof c === 'number').length === 10 && wideProd.colTotals[wideProd.colKeys.indexOf(k(2026, 9))] > 0, 'full window shows the crude-only production months (Oct-26 ...)');
+const defProd = V.crudeLayering(R, {}, 'pricing', 'prod');
+near(defProd.colTotals[defProd.colKeys.indexOf(E.EARLIER)], sum(wideProd.colKeys.filter(c => typeof c === 'number' && c < R.productStart).map(c => wideProd.colTotals[wideProd.colKeys.indexOf(c)])), 'default window folds Sep-Dec production into Earlier months');
+// stock tables: months outside the window are hidden
+ok(V.monthEnd(R, 'pricing', '', {}, mid).colKeys.join() === [k(2027, 2), k(2027, 3), k(2027, 4)].join(), 'month-end table shows only window months');
+ok(V.monthEnd(R, 'pricing', '', {}, full).colKeys.length === 10, 'month-end table can show the crude-only months');
+ok(V.marginByProduct(R, mid).colKeys.length === 3 && V.marginByProduct(R, mid).total < V.marginByProduct(R).total, 'margin table respects the window');
+near(V.marginByProduct(R).total, s.totalSold, 'margin over the default window == total sold');
+ok(V.productSummary(R, mid)[0].open > 0 || V.productSummary(R, mid).some(x => x.open > 0), 'product summary uses the first window month as opening');
+// export builds with any window
+const win0 = V.resolveWin(R, mid); ok(win0.start === mid.start && win0.end === mid.end, 'resolveWin keeps a valid window');
+ok(V.resolveWin(R, { start: mid.end, end: mid.start }).start === mid.start, 'resolveWin swaps a reversed window');
 
 // ---------- 6. robustness ----------
 const bad = P.parseAoa([['', 'Crude Consumption Plan'], ['', 'Crude Grade', 'Nov-26'], ['', 'X', 10]]);

@@ -21,21 +21,25 @@ Use **Data Input -> Download template** for a ready example. Sheet names are mat
 
 | Worksheet | Columns |
 |---|---|
-| Crude Consumption | Crude Grade, Benchmark, one column per production month |
-| Product Yield | Product, Benchmark, one column per production month (volumes, not %) |
-| Opening Crude | Crude Grade, **Pricing Month**, Volume (one row per pricing month; a grade may repeat) |
-| Opening Product | Product, **Pricing Month**, Volume (one row per pricing month; a product may repeat) |
+| Crude Consumption | Crude Grade, Benchmark, one column per month - **starts earlier than the product data** |
+| Product Yield | Product, Benchmark, one column per production month (volumes, not %) - first month = first product month |
+| Opening Crude | Crude Grade, **Pricing Month**, Volume - crude stock at the **start of the crude data** (one row per pricing month) |
+| Opening Product | Product, **Source** (Production or Purchase), **Month**, Volume - stock at the start of the first product month. Month = production month for Production, pricing month for Purchase |
 | Crude Imports | Crude Grade, Arrival Month, Pricing Month, Volume |
 | Product Purchases (optional) | Product, Arrival **Date**, Pricing Month, Volume (optional "Arrival Half" column = 1 or 2) |
 | Demand | Product, one column per sales month |
 
-Any number of months. Every opening row must state its pricing month (missing ones are flagged and shown as "Pre-horizon"). The older single-sheet stacked layout is still accepted.
+Any number of months. **Crude data should start earlier than product data**: opening product that was produced in an earlier month is traced to the crude consumed in that month, so crude consumption (and crude imports / opening crude) must reach back to the earliest production month listed in Opening Product. Example: product data from Jan-27, opening product made Sep-Dec 2026, crude data from Sep-26. Opening rows without a month are flagged and shown as "Pre-horizon"; opening production that cannot be traced (no crude data for its month) is flagged too. The older single-sheet stacked layout is still accepted.
+
+## Display months (Settings)
+
+Settings has a **Display from / to** window (default: the product horizon). Flow tables (sales and production month axes, percentages, cargo analysis) fold months outside the window into **Earlier months** / **Later months** columns so totals still tie; stock tables (month-end exposure, inventory, balances) and the margin tables show only the window. The dashboard figures and the Excel export follow the window; calculations always use the whole timeline.
 
 ## Method
 
 1. Crude is consumed FIFO per grade (oldest pricing month first).
 2. Each month's production is a pro-rata blend of the crude consumed that month (yields are not grade-specific).
-3. Products are sold in a configurable **sales priority**. Stock older than the previous month (incl. opening inventory) always goes first, oldest first. Then, by default: 1) previous month's production, 2) previous month's imports, 3) current month's imports arriving 1st-15th, 4) current month's production, 5) current month's imports arriving 16th-month end. Reorder these on the Product Layering page.
+3. Products are sold in a configurable **sales priority**. Stock older than the previous month (opening purchases, and production from before then) always goes first, oldest first; opening production from the month before the product data starts counts as "previous month's production". Then, by default: 1) previous month's production, 2) previous month's imports, 3) current month's imports arriving 1st-15th, 4) current month's production, 5) current month's imports arriving 16th-month end. Reorder these on the Product Layering page.
 4. Each sale is traced back to the crude pricing month(s) behind it -> pricing month x sales month matrix.
 
 ### Crude Layering page extras
