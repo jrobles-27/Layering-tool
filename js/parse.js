@@ -73,6 +73,7 @@
     if (typeof header === 'string') {
       const h = header.trim().toLowerCase();
       if (/^(source|origin)/.test(h)) return 'source';
+      if (/load|lift|b\/?l\b|bill of lading/.test(h)) return 'loading';
       if (/^(month|date)$/.test(h)) return 'monthcol';
       if (/benchmark|price\s*ref|index/.test(h)) return 'benchmark';
       if (/half|\b[12]h\b/.test(h)) return 'half';
@@ -168,6 +169,34 @@
     // Crude data may start earlier than product data (opening product can come from older production months).
     const crudeMonths = new Set(), productMonths = new Set();
 
+    // --- name normalisation -------------------------------------------------
+    // "ARAB  Light " and "Arab Light" are the same grade. Names are matched on a folded key
+    // (trimmed, inner runs of whitespace collapsed, case-folded) and displayed using the first
+    // spelling seen, so "SRFO 180 3.5%S" and "Jet A-1" keep their own capitalisation.
+    const registry = { grade: new Map(), product: new Map(), benchmark: new Map() };
+    const foldKey = s => String(s).replace(/\s+/g, ' ').trim().toLowerCase();
+    function canon(kind, raw) {
+      const tidy = String(raw == null ? '' : raw).replace(/\s+/g, ' ').trim();
+      if (!tidy) return '';
+      const key = foldKey(tidy);
+      const reg = registry[kind];
+      let e = reg.get(key);
+      if (!e) { e = { display: tidy, variants: new Set() }; reg.set(key, e); }
+      e.variants.add(tidy);
+      return e.display;
+    }
+    const KIND_LABEL = { grade: 'Crude grade', product: 'Product', benchmark: 'Benchmark' };
+    function reportMerges() {
+      Object.keys(registry).forEach(kind => {
+        registry[kind].forEach(e => {
+          if (e.variants.size > 1) {
+            const others = [...e.variants].filter(v => v !== e.display);
+            warn(`${KIND_LABEL[kind]} "${e.display}" is also written as ${others.map(v => `"${v}"`).join(', ')} - treated as the same ${kind === 'benchmark' ? 'benchmark' : kind}.`);
+          }
+        });
+      });
+    }
+
     // --- consumption / yield: month grid (+ legacy beginning-inventory columns) ---
     const grid = (id, title, key, nameKey, valKey, openKey, listKey) => {
       if (!need(id, true)) return;
@@ -176,17 +205,18 @@
       mc.forEach(m => (id === 'crude' ? crudeMonths : productMonths).add(m.k));
       if (op && !colBy(b, 'pricing')) warn(`${where(id)}: has a beginning-inventory column but no "Pricing Month" column. Use the separate opening-inventory worksheet, which states the pricing month of each opening layer.`);
       b.rows.forEach(r => {
+        const name = canon(nameKey, r.label);
         const vals = {};
-        mc.forEach(m => { const v = num(r.row[m.c], `${where(id)}, ${r.label}, ${fmtKey(m.k)}`); if (v) vals[m.k] = v; });
-        const bench = bm ? str(r.row[bm.c]) : '';
-        input[key].push({ [nameKey]: r.label, benchmark: bench, [valKey]: vals });
+        mc.forEach(m => { const v = num(r.row[m.c], `${where(id)}, ${name}, ${fmtKey(m.k)}`); if (v) vals[m.k] = v; });
+        const bench = bm ? canon('benchmark', r.row[bm.c]) : '';
+        input[key].push({ [nameKey]: name, benchmark: bench, [valKey]: vals });
         if (op) {
-          const ov = num(r.row[op.c], `${where(id)}, ${r.label}, beginning inventory`);
+          const ov = num(r.row[op.c], `${where(id)}, ${name}, beginning inventory`);
           if (ov > 0) {
-            const pk = pricingCell(b, r, `${where(id)}, ${r.label}`);
+            const pk = pricingCell(b, r, `${where(id)}, ${name}`);
             input[listKey].push(listKey === 'openProducts'
-              ? { product: r.label, benchmark: bench, volume: ov, source: 'Opening', month: pk }
-              : { [nameKey]: r.label, benchmark: bench, volume: ov, pricing: pk });
+              ? { product: name, benchmark: bench, volume: ov, source: 'Opening', month: pk }
+              : { [nameKey]: name, benchmark: bench, volume: ov, pricing: pk });
           }
         }
       });
@@ -203,8 +233,9 @@
       else {
         if (!colBy(b, 'pricing')) err(`${where(id)}: needs a "Pricing Month" column - every opening layer must state its pricing month.`);
         b.rows.forEach(r => {
-          const v = num(r.row[vo.c], `${where(id)}, ${r.label}, volume`);
-          if (v > 0) input.openCrude.push({ grade: r.label, benchmark: bm ? str(r.row[bm.c]) : '', volume: v, pricing: pricingCell(b, r, `${where(id)}, ${r.label}`) });
+          const name = canon('grade', r.label);
+          const v = num(r.row[vo.c], `${where(id)}, ${name}, volume`);
+          if (v > 0) input.openCrude.push({ grade: name, benchmark: bm ? canon('benchmark', r.row[bm.c]) : '', volume: v, pricing: pricingCell(b, r, `${where(id)}, ${name}`) });
         });
       }
     }
@@ -219,18 +250,19 @@
       else {
         if (!so) warn(`${where(id)}: no "Source" column - rows are read as stock priced in the given month. Add Source = Purchase or Production.`);
         b.rows.forEach(r => {
-          const v = num(r.row[vo.c], `${where(id)}, ${r.label}, volume`);
+          const name = canon('product', r.label);
+          const v = num(r.row[vo.c], `${where(id)}, ${name}, volume`);
           if (!(v > 0)) return;
           let source = 'Opening';
           if (so) {
-            const s = str(r.row[so.c]).toLowerCase();
+            const s = foldKey(r.row[so.c]);
             if (/^purch|^import|^buy|^bought/.test(s)) source = 'Purchase';
             else if (/^prod|^refin|^made/.test(s)) source = 'Production';
-            else { err(`${where(id)}, ${r.label}: Source "${r.row[so.c]}" not recognised - use Purchase or Production.`); return; }
+            else { err(`${where(id)}, ${name}: Source "${r.row[so.c]}" not recognised - use Purchase or Production.`); return; }
           }
           let month = null;
-          if (!isBlank(r.row[mcol.c])) { month = monthKey(r.row[mcol.c]); if (month === null) warn(`${where(id)}, ${r.label}: month "${r.row[mcol.c]}" not recognised.`); }
-          input.openProducts.push({ product: r.label, benchmark: bm ? str(r.row[bm.c]) : '', volume: v, source, month });
+          if (!isBlank(r.row[mcol.c])) { month = monthKey(r.row[mcol.c]); if (month === null) warn(`${where(id)}, ${name}: month "${r.row[mcol.c]}" not recognised.`); }
+          input.openProducts.push({ product: name, benchmark: bm ? canon('benchmark', r.row[bm.c]) : '', volume: v, source, month });
         });
       }
     }
@@ -241,24 +273,32 @@
       if (!mc.length) err(`${where('demand')}: no month columns found in the header row.`);
       mc.forEach(m => productMonths.add(m.k));
       b.rows.forEach(r => {
+        const name = canon('product', r.label);
         const d = {};
-        mc.forEach(m => { const v = num(r.row[m.c], `${where('demand')}, ${r.label}, ${fmtKey(m.k)}`); if (v) d[m.k] = v; });
-        input.demand.push({ product: r.label, demand: d });
+        mc.forEach(m => { const v = num(r.row[m.c], `${where('demand')}, ${name}, ${fmtKey(m.k)}`); if (v) d[m.k] = v; });
+        input.demand.push({ product: name, demand: d });
       });
     }
 
     // --- imports / purchases ---
     const flows = (id, nameKey, listKey, withHalf) => {
       if (!need(id, false)) return;
-      const b = blocks[id], ar = colBy(b, 'arrival'), vo = colBy(b, 'volume'), bm = colBy(b, 'benchmark'), hf = colBy(b, 'half');
+      const b = blocks[id], ar = colBy(b, 'arrival'), vo = colBy(b, 'volume'), bm = colBy(b, 'benchmark'), hf = colBy(b, 'half'), ld = colBy(b, 'loading');
       if (!ar || !vo) { err(`${where(id)}: needs "Arrival" and "Volume" columns.`); return; }
       if (!colBy(b, 'pricing')) warn(`${where(id)}: no "Pricing Month" column - pricing month will be assumed to be the month before arrival.`);
       b.rows.forEach(r => {
+        const name = canon(nameKey, r.label);
         const a = monthKey(r.row[ar.c]);
-        if (a === null) { err(`${where(id)}, ${r.label}: arrival "${r.row[ar.c]}" not recognised.`); return; }
-        const vol = num(r.row[vo.c], `${where(id)}, ${r.label}, volume`);
+        if (a === null) { err(`${where(id)}, ${name}: arrival "${r.row[ar.c]}" not recognised.`); return; }
+        const vol = num(r.row[vo.c], `${where(id)}, ${name}, volume`);
         if (!(vol > 0)) return;
-        const rec = { [nameKey]: r.label, arrival: a, pricing: pricingCell(b, r, `${where(id)}, ${r.label}`), volume: vol, benchmark: bm ? str(r.row[bm.c]) : '' };
+        const rec = { [nameKey]: name, arrival: a, pricing: pricingCell(b, r, `${where(id)}, ${name}`), volume: vol, benchmark: bm ? canon('benchmark', r.row[bm.c]) : '' };
+        // Loading month is informational only: availability and FIFO still follow arrival and pricing month.
+        if (ld && !isBlank(r.row[ld.c])) {
+          const lk = monthKey(r.row[ld.c]);
+          if (lk === null) warn(`${where(id)}, ${name}: loading month "${r.row[ld.c]}" not recognised.`);
+          else rec.loading = lk;
+        }
         if (withHalf) {
           let half = hf ? halfText(r.row[hf.c]) : null;
           if (half === null) { const d = dayOf(r.row[ar.c]); half = d !== null && d > 15 ? 2 : 1; }
@@ -289,6 +329,7 @@
     dup(input.crudes, 'grade', 'Crude grade');
     dup(input.products, 'product', 'Product');
     dup(input.demand, 'product', 'Demand row for');
+    reportMerges();
 
     return { input, issues, ok: !issues.some(i => i.level === 'error') };
   }

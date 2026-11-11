@@ -28,6 +28,7 @@ ok(inp.crudeImports.length === 36 && inp.productPurchases.length === 3, 'import 
 ok(inp.openCrude[0].pricing === P.monthKey('Jul-26'), 'opening crude pricing month parsed');
 ok(inp.openProducts[0].month === P.monthKey('Oct-26'), 'opening product month parsed');
 ok(inp.productPurchases.map(p => p.half).join() === '1,2,1', 'arrival half taken from the arrival date (5th, 22nd, 10th)');
+ok(inp.crudeImports.every(r => r.loading === r.arrival - 1), 'loading month parsed, one month before arrival');
 ok(P.monthKey(46327) === 2026 * 12 + 10, 'excel serial 46327 = Nov-26');
 ok(P.monthKey('Nov 2026') === 2026 * 12 + 10 && P.monthKey('2026-11') === 2026 * 12 + 10 && P.monthKey('20-Jan-27') === 2027 * 12, 'text months');
 
@@ -182,19 +183,19 @@ function prioCase(demandMar, priority) {
 }
 const marSales = r => r.sales.filter(x => x.sale === kM && x.vol > 1e-9).map(x => `${x.layer}=${Math.round(x.vol)}`).join('; ');
 let r1 = prioCase(300);
-ok(marSales(r1) === 'Prod Jan-27=100; Prod Feb-27=100; Purchase Feb-27 (1st half)=30; Purchase Mar-27 (1st half)=50; Prod Mar-27=20',
+ok(marSales(r1) === 'Prod Jan-27=100; Prod Feb-27=100; Purchase Feb-27 1st half (priced Jan-27)=30; Purchase Mar-27 1st half (priced Feb-27)=50; Prod Mar-27=20',
   'default order: old stock, prev production, prev imports, current 1st-half imports, current production: ' + marSales(r1));
 r1 = prioCase(400);
-ok(marSales(r1) === 'Prod Jan-27=100; Prod Feb-27=100; Purchase Feb-27 (1st half)=30; Purchase Mar-27 (1st half)=50; Prod Mar-27=100; Purchase Mar-27 (2nd half)=20',
+ok(marSales(r1) === 'Prod Jan-27=100; Prod Feb-27=100; Purchase Feb-27 1st half (priced Jan-27)=30; Purchase Mar-27 1st half (priced Feb-27)=50; Prod Mar-27=100; Purchase Mar-27 2nd half (priced Feb-27)=20',
   'default order: 2nd-half imports come last: ' + marSales(r1));
 r1 = prioCase(300, ['prevProd', 'prevImp', 'curProd', 'curImp1', 'curImp2']);
-ok(marSales(r1) === 'Prod Jan-27=100; Prod Feb-27=100; Purchase Feb-27 (1st half)=30; Prod Mar-27=70',
+ok(marSales(r1) === 'Prod Jan-27=100; Prod Feb-27=100; Purchase Feb-27 1st half (priced Jan-27)=30; Prod Mar-27=70',
   '4 before 3: current production sold before current 1st-half imports: ' + marSales(r1));
 r1 = prioCase(400, ['prevProd', 'prevImp', 'curImp1', 'curImp2', 'curProd']);
-ok(marSales(r1) === 'Prod Jan-27=100; Prod Feb-27=100; Purchase Feb-27 (1st half)=30; Purchase Mar-27 (1st half)=50; Purchase Mar-27 (2nd half)=40; Prod Mar-27=80',
+ok(marSales(r1) === 'Prod Jan-27=100; Prod Feb-27=100; Purchase Feb-27 1st half (priced Jan-27)=30; Purchase Mar-27 1st half (priced Feb-27)=50; Purchase Mar-27 2nd half (priced Feb-27)=40; Prod Mar-27=80',
   '5 before 4: ' + marSales(r1));
 r1 = prioCase(150, ['prevImp', 'prevProd', 'curImp1', 'curProd', 'curImp2']);
-ok(marSales(r1) === 'Prod Jan-27=100; Purchase Feb-27 (1st half)=30; Prod Feb-27=20', '2 before 1 (old stock still first): ' + marSales(r1));
+ok(marSales(r1) === 'Prod Jan-27=100; Purchase Feb-27 1st half (priced Jan-27)=30; Prod Feb-27=20', '2 before 1 (old stock still first): ' + marSales(r1));
 ok(prioCase(10, ['x']).priority.join() === E.DEFAULT_PRIORITY.join(), 'invalid priority ignored');
 const a1 = prioCase(300), a2 = prioCase(300, ['curImp2', 'curProd', 'curImp1', 'prevImp', 'prevProd']);
 near(a1.summary.totalSold, a2.summary.totalSold, 'priority does not change total sold');
@@ -265,8 +266,9 @@ const full = { start: R.months[0], end: R.months[9] }, mid = { start: k(2027, 2)
 });
 const nb = V.crudeLayering(R, {}, 'pricing', 'sale', mid);
 ok(nb.colKeys.filter(c => typeof c === 'number').join() === [k(2027, 2), k(2027, 3), k(2027, 4)].join(), 'narrow window shows only its months');
-near(nb.colTotals[nb.colKeys.indexOf(E.EARLIER)], sum(soldRows.filter(r => r.sale < k(2027, 2)).map(r => r.vol)), 'Earlier-months bucket = sales before the window');
-near(nb.colTotals[nb.colKeys.indexOf(E.LATER)], sum(soldRows.filter(r => r.sale > k(2027, 4)).map(r => r.vol)), 'Later-months bucket = sales after the window');
+const crudeSold = soldRows.filter(r => r.src === 'Crude');   // the crude page excludes purchased product
+near(nb.colTotals[nb.colKeys.indexOf(E.EARLIER)], sum(crudeSold.filter(r => r.sale < k(2027, 2)).map(r => r.vol)), 'Earlier-months bucket = sales before the window');
+near(nb.colTotals[nb.colKeys.indexOf(E.LATER)], sum(crudeSold.filter(r => r.sale > k(2027, 4)).map(r => r.vol)), 'Later-months bucket = sales after the window');
 const wideProd = V.crudeLayering(R, {}, 'pricing', 'prod', full);
 ok(wideProd.colKeys.filter(c => typeof c === 'number').length === 10 && wideProd.colTotals[wideProd.colKeys.indexOf(k(2026, 9))] > 0, 'full window shows the crude-only production months (Oct-26 ...)');
 const defProd = V.crudeLayering(R, {}, 'pricing', 'prod');
@@ -274,12 +276,123 @@ near(defProd.colTotals[defProd.colKeys.indexOf(E.EARLIER)], sum(wideProd.colKeys
 // stock tables: months outside the window are hidden
 ok(V.monthEnd(R, 'pricing', '', {}, mid).colKeys.join() === [k(2027, 2), k(2027, 3), k(2027, 4)].join(), 'month-end table shows only window months');
 ok(V.monthEnd(R, 'pricing', '', {}, full).colKeys.length === 10, 'month-end table can show the crude-only months');
-ok(V.marginByProduct(R, mid).colKeys.length === 3 && V.marginByProduct(R, mid).total < V.marginByProduct(R).total, 'margin table respects the window');
-near(V.marginByProduct(R).total, s.totalSold, 'margin over the default window == total sold');
+ok(V.marginByBench(R, mid).colKeys.length === 3 && V.marginByBench(R, mid).total < V.marginByBench(R).total, 'margin table respects the window');
+near(V.marginByBench(R).total, s.totalSold - sum(R.sales.filter(x => x.kind !== 'Production' && x.sale !== E.END).map(x => x.vol)), 'margin over the default window == production sold');
 ok(V.productSummary(R, mid)[0].open > 0 || V.productSummary(R, mid).some(x => x.open > 0), 'product summary uses the first window month as opening');
 // export builds with any window
 const win0 = V.resolveWin(R, mid); ok(win0.start === mid.start && win0.end === mid.end, 'resolveWin keeps a valid window');
 ok(V.resolveWin(R, { start: mid.end, end: mid.start }).start === mid.start, 'resolveWin swaps a reversed window');
+
+// ---------- 5d. name normalisation ----------
+// The canonical spelling stays in Crude Consumption / Product Yield; the later sheets are messy.
+const MESSY_SHEETS = ['Opening Crude', 'Crude Imports', 'Demand', 'Opening Product', 'Product Purchases'];
+const messy = D.buildDemoSheets().map(s => ({
+  name: s.name,
+  aoa: !MESSY_SHEETS.includes(s.name) ? s.aoa : s.aoa.map((row, i) => i === 0 ? row : row.map((v, j) => {
+    if (j !== 0 || typeof v !== 'string') return v;
+    if (v === 'Arab Light') return '  ARAB   Light ';          // case + leading/inner/trailing spaces
+    if (v === 'Gasoline 92') return 'gasoline 92';             // case only
+    return v;
+  }))
+}));
+const mp2 = P.parseSheets(messy);
+ok(mp2.ok, 'messy names still parse');
+ok(mp2.input.crudes.some(c => c.grade === 'Arab Light') && !mp2.input.crudes.some(c => /ARAB/.test(c.grade)), 'ARAB   Light folds into Arab Light');
+ok(mp2.input.products.some(c => c.product === 'Gasoline 92'), 'gasoline 92 folds into Gasoline 92');
+ok(mp2.input.crudes.length === inp.crudes.length && mp2.input.products.length === inp.products.length, 'folding does not create extra rows');
+const MR = E.run(mp2.input);
+ok(MR.grades.length === R.grades.length && MR.products.length === R.products.length, 'engine sees the same universe');
+near(MR.summary.totalSold, s.totalSold, 'folded names give the same result');
+ok(mp2.issues.some(i => /also written as/.test(i.msg)), 'merges are reported');
+ok(!mp2.issues.some(i => i.level === 'error'), 'merges are warnings, not errors');
+// benchmark names fold too (so "Jet " and "jet" are one benchmark)
+const bmess = D.buildDemoSheets().map(s => ({ name: s.name, aoa: s.aoa.map((row, i) => i === 0 || s.name !== 'Product Yield' ? row : row.map((v, j) => j === 1 && v === 'MOPS Jet/Kero' ? '  mops   jet/kero ' : v)) }));
+const BR = E.run(P.parseSheets(bmess).input);
+ok(BR.prodBench['Jet/Kero'] === 'mops jet/kero', 'benchmark text is trimmed and inner spaces collapsed');
+ok(V.benchmarks(BR).length === V.benchmarks(R).length, 'no extra benchmark is created by the respacing');
+// two products written with different spellings of one benchmark end up in a single group
+const jmess = D.buildDemoSheets().map(s => ({ name: s.name, aoa: s.aoa.map((row, i) => i === 0 || s.name !== 'Product Yield' ? row : row.map((v, j) => j === 1 && v === 'MOPS Naphtha' ? ' mops   JET/KERO ' : v)) }));
+const JR = E.run(P.parseSheets(jmess).input);
+ok(JR.prodBench['Naphtha'] === JR.prodBench['Jet/Kero'], 'Naphtha and Jet/Kero now share one benchmark');
+ok(V.benchmarks(JR).length === V.benchmarks(R).length - 1, 'the two products report as one benchmark group');
+ok(V.productSummary(JR).find(x => x.bench === 'MOPS Jet/Kero').products === 2, 'the benchmark group covers both products');
+
+// ---------- 5e. zero tolerance ----------
+const kA = k(2027, 0);
+const gapCase = tol => E.run({
+  months: [kA], productStart: kA,
+  crudes: [{ grade: 'A', benchmark: 'B', consumption: { [kA]: 100 } }],
+  products: [{ product: 'P', benchmark: 'C', production: { [kA]: 100 } }],
+  openCrude: [{ grade: 'A', benchmark: 'B', volume: 99.7, pricing: k(2026, 11) }], openProducts: [],
+  crudeImports: [], productPurchases: [], demand: [{ product: 'P', demand: { [kA]: 50 } }]
+}, tol == null ? undefined : { tolerance: tol });
+const gTol = gapCase();          // default 0.5 kb: a 0.3 kb gap is rounding
+const gRaw = gapCase(0);         // no tolerance: the old behaviour
+ok(!gTol.cargoes.some(c => c.src === 'Unplanned'), 'sub-tolerance gap creates no unplanned cargo');
+ok(gTol.shortfalls.length === 0 && gTol.tinyGaps.length === 1, 'sub-tolerance gap is recorded as a tiny gap');
+ok(gTol.checks.some(c => /Tiny crude gaps ignored/.test(c.title)), 'ignored gap is still reported in the checks');
+ok(!gTol.expRows.some(r => r.pricing === E.UNPLANNED), 'no Unplanned pricing row that would print as 0 kb');
+ok(gRaw.cargoes.some(c => c.src === 'Unplanned'), 'with tolerance 0 the tiny gap does become an unplanned cargo');
+near(gRaw.shortfalls[0].vol, 0.3, 'and it is the 0.3 kb that was missing', 1e-9);
+near(gTol.summary.endCrude, 0, 'tolerance case still closes the crude balance');
+gTol.crudeBal.forEach(b => near(b.open + b.receipts - b.consumed, b.close, 'crude balance closes under tolerance'));
+ok(R.shortfalls.length === 1 && R.shortfalls[0].vol === 100, 'the demo 100 kb shortfall is well above tolerance and still reported');
+
+// ---------- 5f. crude page excludes purchased product ----------
+ok(V.crudeRows(R).every(r => r.src === 'Crude'), 'crude rows are own crude only');
+const withPurch = R.expRows.filter(r => r.src !== 'Crude');
+ok(withPurch.length > 0, 'the demo does have purchased/opening product exposure');
+near(V.crudeLayering(R, {}, 'pricing').total, sum(V.crudeRows(R).map(r => r.vol)), 'crude layering total excludes purchased product');
+ok(!V.crudeLayering(R, {}, 'grade').rowKeys.includes('Purchased product'), 'no "Purchased product" row on the crude page');
+
+// ---------- 5g. margin exposure = refinery production only ----------
+const mb2 = V.marginByBench(R);
+const prodSold = sum(R.sales.filter(x => x.kind === 'Production' && x.sale !== E.END).map(x => x.vol));
+const purchSold = sum(R.sales.filter(x => x.kind !== 'Production' && x.sale !== E.END).map(x => x.vol));
+near(mb2.total, prodSold, 'crack exposure counts production volume only');
+ok(purchSold > 0, 'the demo sells purchased product too');
+near(s.totalSold - mb2.total, purchSold, 'the excluded volume is exactly the purchased product');
+ok(mb2.rowKeys.every(b => V.benchmarks(R).includes(b)), 'margin rows are product benchmarks');
+near(V.marginByProdMonth(R).total, mb2.total, 'crack by production month ties to crack by benchmark');
+// opening stock that was produced counts as production; opening purchases do not
+const openProdSold = sum(R.sales.filter(x => x.opening && x.kind === 'Production' && x.sale !== E.END).map(x => x.vol));
+ok(openProdSold > 0, 'opening production is sold in the demo');
+ok(sum(R.sales.filter(x => x.opening && x.kind === 'Purchase' && x.sale !== E.END).map(x => x.vol)) > 0, 'opening purchases are sold too');
+near(V.pct(mb2, 'col').colTotals.filter(x => x > 0).length, V.pct(mb2, 'col').colTotals.filter(x => x > 0).length, 'percentage view builds');
+
+// ---------- 5h. product layering by benchmark, purchases split by pricing month ----------
+ok(V.benchmarks(R).length === R.products.length, 'demo has one product per benchmark');
+const psum = V.productSummary(R);
+near(sum(psum.map(x => x.sales)), s.totalSold, 'product summary sales tie to total sold');
+ok(psum.every(x => !('coverDays' in x)), 'closing cover is gone');
+const purchLabels = R.layerOrder.filter(l => R.layerType[l] === 'Purchase');
+ok(purchLabels.every(l => /priced /.test(l)), 'every purchase layer names its pricing month: ' + purchLabels.join(' | '));
+// two cargoes, same arrival half, different pricing months -> two rows
+const kS = k(2027, 0), kT = k(2027, 1);
+const twoBuys = E.run({
+  months: [kS, kT], productStart: kS,
+  crudes: [{ grade: 'A', benchmark: 'B', consumption: { [kS]: 10, [kT]: 10 } }],
+  products: [{ product: 'P', benchmark: 'C', production: { [kS]: 10, [kT]: 10 } }],
+  openCrude: [{ grade: 'A', benchmark: 'B', volume: 100, pricing: k(2026, 11) }], openProducts: [],
+  crudeImports: [],
+  productPurchases: [
+    { product: 'P', arrival: kT, pricing: k(2026, 10), volume: 30, benchmark: '', half: 1 },
+    { product: 'P', arrival: kT, pricing: k(2026, 11), volume: 40, benchmark: '', half: 1 }
+  ],
+  demand: [{ product: 'P', demand: { [kT]: 60 } }]
+});
+const buyRows = twoBuys.layerOrder.filter(l => twoBuys.layerType[l] === 'Purchase');
+ok(buyRows.length === 2, 'same arrival half + different pricing months = two separate rows: ' + buyRows.join(' | '));
+ok(buyRows[0].includes('Nov-26') && buyRows[1].includes('Dec-26'), 'purchase rows are ordered by pricing month');
+const pl = V.productLayering(twoBuys, '', { start: kS, end: kT });
+near(pl.get(buyRows[0], kT) + pl.get(buyRows[1], kT), 60 - pl.get('Prod Jan-27', kT) - pl.get('Prod Feb-27', kT), 'both purchase rows carry their own volume');
+// the source filter splits the same table into production and purchase rows
+const onlyProd = V.productLayering(R, '', undefined, 'Production'), onlyBuy = V.productLayering(R, '', undefined, 'Purchase');
+ok(onlyProd.rowKeys.every(l => R.layerType[l] === 'Production') && onlyBuy.rowKeys.every(l => R.layerType[l] === 'Purchase'), 'source filter keeps only its own rows');
+near(onlyProd.total + onlyBuy.total, V.productLayering(R, '').total, 'production + purchase rows = all rows');
+// benchmark filter
+const oneBench = V.productLayering(R, 'MOPS Jet/Kero');
+near(oneBench.total, sum(R.sales.filter(x => x.pbench === 'MOPS Jet/Kero').map(x => x.vol)), 'benchmark filter on product layering');
 
 // ---------- 6. robustness ----------
 const bad = P.parseAoa([['', 'Crude Consumption Plan'], ['', 'Crude Grade', 'Nov-26'], ['', 'X', 10]]);

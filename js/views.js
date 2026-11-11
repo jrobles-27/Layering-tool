@@ -15,6 +15,7 @@
     bench: { label: 'Benchmark', fn: r => r.bench || 'Unmapped', fmt: x => x },
     grade: { label: 'Crude grade / source', fn: r => r.grade, fmt: x => x },
     src: { label: 'Exposure source', fn: r => r.src, fmt: x => x },
+    pbench: { label: 'Product benchmark', fn: r => r.pbench || '(crude in tank)', fmt: x => x },
     product: { label: 'Product', fn: r => r.product || '(crude in tank)', fmt: x => x },
     kind: { label: 'Inventory type', fn: r => r.kind, fmt: x => x },
     prod: { label: 'Production month', fn: r => r.prodKey, fmt: fmtMonth },
@@ -49,14 +50,18 @@
     return undefined;
   }
 
-  /** Crude layering: <rowDim> x <colDim> (default: sales month). Filters: {bench, grade, product, src}. */
+  /** Rows behind the Crude Layering page: own crude only. Purchased / opening product carries
+   *  product flat-price exposure, not crude exposure, and is reported on Product Layering instead. */
+  const crudeRows = R => R.expRows.filter(r => r.src === 'Crude');
+
+  /** Crude layering: <rowDim> x <colDim> (default: sales month). Filters: {bench, grade, pbench}. */
   function crudeLayering(R, f, dim, colDim, win) {
     f = f || {};
     dim = dim || 'pricing'; colDim = colDim || 'sale';
     const w = resolveWin(R, win);
-    const rows = R.expRows.filter(r =>
+    const rows = crudeRows(R).filter(r =>
       (!f.bench || r.bench === f.bench) && (!f.grade || r.grade === f.grade) &&
-      (!f.product || r.product === f.product) && (!f.src || r.src === f.src));
+      (!f.pbench || r.pbench === f.pbench));
     const o = {};
     const rk = dimKeys(dim, R, w), ck = dimKeys(colDim, R, w);
     if (rk) o.rowKeys = rk;
@@ -101,7 +106,7 @@
     f = f || {};
     const w = resolveWin(R, win);
     const list = cargoFilter(R, f), ids = new Set(list.map(c => c.id));
-    const rows = R.expRows.filter(r => r.cargoId != null && ids.has(r.cargoId) && (!f.product || r.product === f.product));
+    const rows = R.expRows.filter(r => r.cargoId != null && ids.has(r.cargoId) && (!f.pbench || r.pbench === f.pbench));
     return { list, pv: pivot(rows, r => r.cargoId, r => bucket(r.sale, w), { rowKeys: list.map(c => c.id), colKeys: saleKeys(R, w, [END]) }) };
   }
   /** Production month x sales month for one cargo (cargoId) or all cargoes in the filter (cargoId == null). */
@@ -109,7 +114,7 @@
     f = f || {};
     const w = resolveWin(R, win);
     const ids = new Set(cargoFilter(R, f).map(c => c.id));
-    const rows = R.expRows.filter(r => r.cargoId != null && ids.has(r.cargoId) && (cargoId == null || r.cargoId === cargoId) && (!f.product || r.product === f.product));
+    const rows = R.expRows.filter(r => r.cargoId != null && ids.has(r.cargoId) && (cargoId == null || r.cargoId === cargoId) && (!f.pbench || r.pbench === f.pbench));
     return pivot(rows, r => bucket(r.prodKey, w), r => bucket(r.sale, w), { rowKeys: timeKeys(R, w, ['Not yet consumed']), colKeys: saleKeys(R, w, [END]) });
   }
 
@@ -122,18 +127,27 @@
     return out;
   }
 
-  /** Product layering: which layer is sold in which month. product '' = all products. */
-  function productLayering(R, product, win) {
+  /** Benchmarks, in the order their products first appear. Product analysis is reported per benchmark
+   *  (e.g. Jet and Kerosene under "Jet"); physical layering stays per product, since demand is per product. */
+  function benchmarks(R) {
+    const out = [];
+    R.products.forEach(p => { const b = R.prodBench[p] || 'Unmapped'; if (!out.includes(b)) out.push(b); });
+    return out;
+  }
+  const productsOf = (R, bench) => R.products.filter(p => (R.prodBench[p] || 'Unmapped') === bench);
+
+  /** Product layering: which layer is sold in which month. bench '' = all benchmarks; kind '' = all sources. */
+  function productLayering(R, bench, win, kind) {
     const w = resolveWin(R, win);
-    const rows = R.sales.filter(s => !product || s.product === product);
+    const rows = R.sales.filter(s => (!bench || s.pbench === bench) && (!kind || s.kind === kind));
     const labels = [...new Set(rows.map(r => r.layer))];
     return pivot(rows, r => r.layer, r => bucket(r.sale, w), { rowKeys: layerOrder(R, labels), colKeys: saleKeys(R, w, [END]) });
   }
 
   /** Month-end product inventory by layer (stock table: window months only). */
-  function productInventory(R, product, win) {
+  function productInventory(R, bench, win, kind) {
     const w = resolveWin(R, win);
-    const rows = R.prodInv.filter(s => (!product || s.product === product) && inWin(s.month, w));
+    const rows = R.prodInv.filter(s => (!bench || s.pbench === bench) && (!kind || s.kind === kind) && inWin(s.month, w));
     const labels = [...new Set(rows.map(r => r.layer))];
     return pivot(rows, r => r.layer, r => r.month, { rowKeys: layerOrder(R, labels), colKeys: pMonthsInWin(R, win) });
   }
@@ -150,43 +164,44 @@
     return pivot(rows, DIMS[dim || 'pricing'].fn, r => r.mo, { colKeys: winMonths(R, win) });
   }
 
-  // ---------- margin (sales months inside the window only) ----------
-  const soldIn = (R, w) => R.sales.filter(s => inWin(s.sale, w));
-  function marginByProduct(R, win) {
-    const w = resolveWin(R, win);
-    return pivot(soldIn(R, w), r => r.product, r => r.sale, { rowKeys: R.products, colKeys: pMonthsInWin(R, win) });
-  }
+  // ---------- margin (crack) exposure ----------
+  // A crack is a product price against a crude price, so it only exists where the barrel came out of
+  // the refinery. Purchased product (bought in the horizon or held as opening purchase stock) has no
+  // crude leg and carries flat-price exposure instead, so it is excluded here.
+  const crackSales = (R, w) => R.sales.filter(s => s.kind === 'Production' && inWin(s.sale, w));
   function marginByBench(R, win) {
     const w = resolveWin(R, win);
-    return pivot(soldIn(R, w), r => R.prodBench[r.product] || 'Unmapped', r => r.sale, { colKeys: pMonthsInWin(R, win) });
+    return pivot(crackSales(R, w), r => r.pbench || 'Unmapped', r => r.sale, { rowKeys: benchmarks(R), colKeys: pMonthsInWin(R, win) });
   }
-  /** Flat-price exposure released into sales, by crude benchmark. */
+  /** Crack volume split by the production month it came from (opening production included). */
+  function marginByProdMonth(R, win) {
+    const w = resolveWin(R, win);
+    return pivot(crackSales(R, w), r => bucket(r.prodKey, w), r => r.sale, { rowKeys: timeKeys(R, w), colKeys: pMonthsInWin(R, win) });
+  }
+  /** Flat-price exposure released into sales, by crude benchmark (production volume only). */
   function crudeByBench(R, win) {
     const w = resolveWin(R, win);
     return pivot(R.expRows.filter(r => r.stage === 'Sold' && r.src === 'Crude' && inWin(r.sale, w)), r => r.bench || 'Unmapped', r => r.sale, { colKeys: pMonthsInWin(R, win) });
   }
-  function productPricedByBench(R, win) {
-    const w = resolveWin(R, win);
-    return pivot(R.expRows.filter(r => r.stage === 'Sold' && r.src !== 'Crude' && inWin(r.sale, w)), r => (r.bench || 'Unmapped') + ' (' + r.src + ')', r => r.sale, { colKeys: pMonthsInWin(R, win) });
-  }
 
-  /** Product summary table (one row per product) over the window months. */
+  /** Product summary table (one row per benchmark) over the window months. */
   function productSummary(R, win) {
     const w = resolveWin(R, win);
-    return R.products.map(p => {
-      const b = R.prodBal.filter(x => x.product === p && inWin(x.month, w));
+    return benchmarks(R).map(bench => {
+      const ps = productsOf(R, bench);
+      const b = R.prodBal.filter(x => ps.includes(x.product) && inWin(x.month, w));
       const sum = f => b.reduce((s, x) => s + f(x), 0);
-      const last = b[b.length - 1];
-      const dLast = last ? last.demand : 0;
+      const months = [...new Set(b.map(x => x.month))].sort((a, c) => a - c);
+      const first = months[0], last = months[months.length - 1];
       return {
-        product: p, bench: R.prodBench[p] || 'Unmapped', open: b[0] ? b[0].open : 0, production: sum(x => x.production), purchases: sum(x => x.purchases),
-        sales: sum(x => x.sales), unmet: sum(x => x.unmet), close: last ? last.close : 0,
-        coverDays: dLast > 0 && last ? last.close / (dLast / 30) : null
+        bench, products: ps.length,
+        open: sum(x => x.month === first ? x.open : 0), production: sum(x => x.production), purchases: sum(x => x.purchases),
+        sales: sum(x => x.sales), unmet: sum(x => x.unmet), close: sum(x => x.month === last ? x.close : 0)
       };
     });
   }
 
-  const api = { DIMS, resolveWin, winMonths, pMonthsInWin, crudeLayering, pct, cargoFilter, cargoByProduction, cargoBySales, cargoProdSales,
-    productLayering, productInventory, monthEnd, marginByProduct, marginByBench, crudeByBench, productPricedByBench, productSummary, layerOrder };
+  const api = { DIMS, resolveWin, winMonths, pMonthsInWin, crudeLayering, crudeRows, pct, cargoFilter, cargoByProduction, cargoBySales, cargoProdSales,
+    productLayering, productInventory, monthEnd, marginByBench, marginByProdMonth, crudeByBench, productSummary, layerOrder, benchmarks, productsOf };
   if (typeof module !== 'undefined' && module.exports) module.exports = api; else root.Views = api;
 })(typeof window !== 'undefined' ? window : globalThis);

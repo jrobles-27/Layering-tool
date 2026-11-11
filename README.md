@@ -25,15 +25,29 @@ Use **Data Input -> Download template** for a ready example. Sheet names are mat
 | Product Yield | Product, Benchmark, one column per production month (volumes, not %) - first month = first product month |
 | Opening Crude | Crude Grade, **Pricing Month**, Volume - crude stock at the **start of the crude data** (one row per pricing month) |
 | Opening Product | Product, **Source** (Production or Purchase), **Month**, Volume - stock at the start of the first product month. Month = production month for Production, pricing month for Purchase |
-| Crude Imports | Crude Grade, Arrival Month, Pricing Month, Volume |
+| Crude Imports | Crude Grade, **Loading Month** (optional, informational), Arrival Month, Pricing Month, Volume |
 | Product Purchases (optional) | Product, Arrival **Date**, Pricing Month, Volume (optional "Arrival Half" column = 1 or 2) |
 | Demand | Product, one column per sales month |
 
 Any number of months. **Crude data should start earlier than product data**: opening product that was produced in an earlier month is traced to the crude consumed in that month, so crude consumption (and crude imports / opening crude) must reach back to the earliest production month listed in Opening Product. Example: product data from Jan-27, opening product made Sep-Dec 2026, crude data from Sep-26. Opening rows without a month are flagged and shown as "Pre-horizon"; opening production that cannot be traced (no crude data for its month) is flagged too. The older single-sheet stacked layout is still accepted.
 
-## Display months (Settings)
+### Names
 
-Settings has a **Display from / to** window (default: the product horizon). Flow tables (sales and production month axes, percentages, cargo analysis) fold months outside the window into **Earlier months** / **Later months** columns so totals still tie; stock tables (month-end exposure, inventory, balances) and the margin tables show only the window. The dashboard figures and the Excel export follow the window; calculations always use the whole timeline.
+Crude grade, product and benchmark names are matched ignoring case and extra spaces, so `ARAB  Light`, `arab light` and `Arab Light` are one grade. The first spelling in the file is the one displayed (so `SRFO 180 3.5%S` and `Jet A-1` keep their capitalisation), and every merge is listed in Data Checks.
+
+## Settings
+
+- **Display from / to** (default: the product horizon). Flow tables (sales and production month axes, percentages, cargo analysis) fold months outside the window into **Earlier months** / **Later months** columns so totals still tie; stock tables (month-end exposure, inventory, balances) and the margin tables show only the window. The dashboard figures and the Excel export follow the window; calculations always use the whole timeline.
+- **Zero tolerance** (default 0.5 kb). A crude shortfall smaller than this is treated as rounding rather than unplanned crude, so it no longer appears as a 0 kb "Unplanned" row. Ignored gaps are still listed in Data Checks.
+- **Loading month** show/hide in the cargo tables.
+
+## Tables
+
+Every analysis table has sortable column headers (click once for descending, again for ascending, then a reset button), a row filter box, and — for long tables — a sticky header row and first column inside their own scroll area. A value that is not zero but would round to zero shows as `<1`, never a misleading `0`.
+
+## Products and benchmarks
+
+All product analysis is grouped by **product benchmark**, so products priced off the same index (for example Jet and Kerosene under `Jet`) are reported together. Physical layering stays per product, because demand arrives per product; only the reporting is aggregated.
 
 ## Method
 
@@ -42,10 +56,22 @@ Settings has a **Display from / to** window (default: the product horizon). Flow
 3. Products are sold in a configurable **sales priority**. Stock older than the previous month (opening purchases, and production from before then) always goes first, oldest first; opening production from the month before the product data starts counts as "previous month's production". Then, by default: 1) previous month's production, 2) previous month's imports, 3) current month's imports arriving 1st-15th, 4) current month's production, 5) current month's imports arriving 16th-month end. Reorder these on the Product Layering page.
 4. Each sale is traced back to the crude pricing month(s) behind it -> pricing month x sales month matrix.
 
-### Crude Layering page extras
+Worked example. Crude A: 100 kb opening priced Dec-26, plus 100 kb arriving Feb-27 priced Jan-27. Consumption 60 in Jan, 100 in Feb; production equals consumption; demand 20 in Jan, 80 in Feb.
 
-- **Percentage breakdown:** any row x column pairing of pricing month, production month, sales month, benchmark, grade, source or product, as % of each row, each column or the grand total (quick views for the common cases).
-- **Cargo analysis:** a cargo is one import or opening-inventory crude layer. View each cargo by production month (when it is run), by sales month (when product made from it is sold), or production x sales for one cargo / all cargoes, in kb or % of cargo.
+- Jan consumes 60 from the Dec-26 layer, so Jan production is 100% Dec-26-priced. Feb consumes the last 40 of Dec-26 plus 60 of Jan-27, so Feb production is 40% Dec-26 / 60% Jan-27.
+- Jan sells 20 kb from Jan production (all Dec-26). Feb sells 80 kb: 40 kb from Jan production (previous month's production), then 40 kb from Feb production, which splits into 16 Dec-26 and 24 Jan-27.
+- Result: Dec-26 -> Jan-27 = 20, Dec-26 -> Feb-27 = 56, Jan-27 -> Feb-27 = 24.
+
+### Crude Layering page
+
+Own crude only — purchased and opening-purchase product carries product flat-price exposure, not crude exposure, and is reported on Product Layering.
+
+- **Percentage breakdown:** any row x column pairing of pricing month, production month, sales month, crude benchmark, crude grade or product benchmark, as % of each row, each column or the grand total (quick views for the common cases).
+- **Cargo analysis:** a cargo is one import or opening-inventory crude layer, with crude grade, loading month, arrival month and pricing month in separate columns. View each cargo by production month (when it is run), by sales month (when product made from it is sold), or production x sales for one cargo / all cargoes, in kb or % of cargo.
+
+### Margin Exposure page
+
+Crack exposure counts **refinery production only** — a crack is a product price against a crude price, so purchased product (bought in the horizon, or held as opening purchase stock) has no crude leg and is excluded. Opening stock with `Source = Production` does count. Tables switch between kb and % of each sales month.
 
 Shortfalls appear as **Unplanned** crude and **Unmet demand**; unknown pricing months as **Pre-horizon**.
 

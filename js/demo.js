@@ -71,10 +71,12 @@
     openProd.forEach(([p, src, mo, v]) => addRow(s, [p, src, serial(mo.y, mo.m), v], [2]));
 
     // ---- 5. Crude Imports (arrival month, pricing month) ----
-    s = sheet('Crude Imports', ['Crude Grade', 'Arrival Month', 'Pricing Month', 'Volume']);
+    // Loading month is informational: the cargo lifts a month before it arrives. FIFO still uses pricing month.
+    s = sheet('Crude Imports', ['Crude Grade', 'Loading Month', 'Arrival Month', 'Pricing Month', 'Volume']);
     const add = (g, ai, v, lag) => { // ai = months since Sep-26
-      const pm = 8 + ai - (lag === undefined ? 1 : lag);
-      addRow(s, [g, serial(2026 + Math.floor((8 + ai) / 12), (8 + ai) % 12), serial(2026 + Math.floor(pm / 12), ((pm % 12) + 12) % 12), v], [1, 2]);
+      const am = 8 + ai, pm = am - (lag === undefined ? 1 : lag), lm = am - 1;
+      const mo = x => serial(2026 + Math.floor(x / 12), ((x % 12) + 12) % 12);
+      addRow(s, [g, mo(lm), mo(am), mo(pm), v], [1, 2, 3]);
     };
     [1100, 1000, 1200, 500, 1000, 1200, 1000, 1100, 1100].forEach((v, i) => add('Arab Light', i, v));
     [600, 650, 700, 450, 500, 700, 600, 700, 600, 600].forEach((v, i) => add('Basrah Medium', i, v));

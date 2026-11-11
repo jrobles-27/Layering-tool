@@ -67,6 +67,9 @@
 
   function run(inp, opts) {
     const prio = validPriority(opts && opts.priority) ? opts.priority.slice() : DEFAULT_PRIORITY.slice();
+    // Volumes at or below this are rounding noise, not real gaps: a crude shortfall smaller than this
+    // does not become an "unplanned" cargo (it would otherwise show as a 0 kb row after rounding).
+    const TOL = opts && opts.tolerance != null && isFinite(opts.tolerance) && opts.tolerance >= 0 ? +opts.tolerance : 0.5;
     const posOf = new Map(prio.map((c, i) => [c, i]));
     const catOf = (L, t) => {
       const d = t - L.a;
@@ -131,7 +134,7 @@
       if (a < 0) add('info', 'Crude import before horizon start', `${r.grade} arriving ${fmtMonth(r.arrival)} (${r.volume} kb) is added to opening supply and available from ${fmtMonth(start)}.`);
       let pricing = r.pricing;
       if (pricing == null) { pricing = r.arrival - 1; add('warn', 'Import without pricing month', `${r.grade} ${fmtMonth(r.arrival)}: assumed priced in ${fmtMonth(pricing)} (arrival - 1).`); }
-      crudeLayers.push({ id: lid++, grade: r.grade, bench: benchOf(r.grade), pricing, avail: Math.max(0, a), vol: r.volume, rem: r.volume, src: 'Import', arrival: r.arrival });
+      crudeLayers.push({ id: lid++, grade: r.grade, bench: benchOf(r.grade), pricing, avail: Math.max(0, a), vol: r.volume, rem: r.volume, src: 'Import', arrival: r.arrival, loading: r.loading == null ? null : r.loading });
     });
     // cargo labels (every crude layer = one cargo): "Grade | arr Jan-27 | priced Dec-26"
     const cargoSeen = new Map();
@@ -140,6 +143,7 @@
         ? `${l.grade} | opening, priced ${l.pricing === PRE ? 'not specified' : fmtMonth(l.pricing)}`
         : `${l.grade} | arr ${fmtMonth(l.arrival)} | priced ${fmtMonth(l.pricing)}`;
       const n = (cargoSeen.get(base) || 0) + 1; cargoSeen.set(base, n);
+      l.seq = n;
       l.label = n > 1 ? `${base} #${n}` : base;
     });
     const extraCargo = [];  // pseudo-cargoes for unplanned (shortfall) crude
@@ -179,13 +183,13 @@
             add('warn', 'Opening product production cannot be traced to crude', `${r.product} produced ${unspecified ? '(month missing)' : fmtMonth(r.month)}, ${r.volume} kb: ${why}. Shown as "Pre-horizon" pricing. Extend the crude consumption data back to that month.`);
             comp = [{ cargoId: -1, cargo: 'Unattributed', pricing: PRE, grade: 'Unattributed', bench: 'Unmapped', src: 'Crude', share: 1 }];
           } else comp = blends[bt];
-          prodLayers.push({ id: plid++, product: r.product, type: 'Production', opening: true, a: unspecified ? -999 : bt, half: 0, avail: pStart,
+          prodLayers.push({ id: plid++, product: r.product, type: 'Production', kind: 'Production', opening: true, a: unspecified ? -999 : bt, half: 0, avail: pStart,
             label: unspecified ? 'Prod (month missing) (opening stock)' : 'Prod ' + fmtMonth(r.month) + ' (opening stock)', prodKey: unspecified ? 'Opening stock' : r.month, vol: r.volume, rem: r.volume, comp });
         } else {
           if (unspecified) add('warn', 'Opening product without pricing month', `${r.product}: ${r.volume} kb of opening inventory has no month - assigned to "Pre-horizon". Add the month in the input.`);
           const pk = unspecified ? PRE : r.month;
           const purchase = src === 'Purchase';
-          prodLayers.push({ id: plid++, product: r.product, type: 'Opening', a: purchase && !unspecified ? idx(pk) : -999, half: 0, avail: pStart,
+          prodLayers.push({ id: plid++, product: r.product, type: 'Opening', kind: purchase ? 'Purchase' : 'Opening', opening: true, a: purchase && !unspecified ? idx(pk) : -999, half: 0, avail: pStart,
             label: purchase ? (unspecified ? 'Opening purchase (pricing month not specified)' : 'Opening purchase (priced ' + fmtMonth(pk) + ')') : openingLabel(pk),
             prodKey: purchase ? 'Purchased product' : 'Opening stock', vol: r.volume, rem: r.volume,
             comp: [{ pricing: pk, grade: purchase ? 'Purchased product' : 'Opening product', bench: pb, src: purchase ? 'Purchased product' : 'Opening product', share: 1 }] });
@@ -201,7 +205,9 @@
       if (pricing == null) { pricing = r.arrival - 1; add('warn', 'Product purchase without pricing month', `${r.product} ${fmtMonth(r.arrival)}: assumed priced in ${fmtMonth(pricing)} (arrival - 1).`); }
       const t = Math.max(pStart, a);
       const half = r.half === 2 ? 2 : 1;
-      const L = { id: plid++, product: r.product, type: 'Purchase', prodKey: 'Purchased product', a, half, avail: t, label: 'Purchase ' + fmtMonth(r.arrival) + (half === 2 ? ' (2nd half)' : ' (1st half)'), vol: r.volume, rem: r.volume,
+      // The pricing month is part of the label: two cargoes arriving in the same half-month but priced
+      // in different months are different exposures and must stay separate line items.
+      const L = { id: plid++, product: r.product, type: 'Purchase', kind: 'Purchase', prodKey: 'Purchased product', a, half, avail: t, label: 'Purchase ' + fmtMonth(r.arrival) + (half === 2 ? ' 2nd half' : ' 1st half') + ' (priced ' + fmtMonth(pricing) + ')', vol: r.volume, rem: r.volume,
         comp: [{ pricing, grade: 'Purchased product', bench: pBenchOf(r.product), src: 'Purchased product', share: 1 }] };
       prodLayers.push(L);
     });
@@ -216,6 +222,7 @@
     const prodBal = [];     // product x month
     const unmet = [];       // {product,t,vol}
     const shortfalls = [];  // {grade,t,vol}
+    const tinyGaps = [];    // sub-tolerance crude gaps, reported but not turned into cargoes
     const consumedByMonth = new Array(T).fill(0);
     const producedByMonth = new Array(T).fill(0);
     const sold = {}; products.forEach(p => { sold[p] = new Array(T).fill(0); });
@@ -248,15 +255,20 @@
             p.vol += d.vol; parts.set(d.layer.id, p);
             cargoUse.push({ cargoId: d.layer.id, t, month: mk, vol: d.vol });
           });
-          if (short > 0) {
+          if (short > TOL) {
             shortVol = short;
             shortfalls.push({ grade: g, t, vol: short });
             const uid = lid++, ulabel = `${g} | unplanned ${fmtMonth(mk)}`;
-            extraCargo.push({ id: uid, label: ulabel, grade: g, bench: benchOf(g), pricing: UNPLANNED, arrival: null, src: 'Unplanned', vol: short });
+            extraCargo.push({ id: uid, label: ulabel, grade: g, bench: benchOf(g), pricing: UNPLANNED, arrival: null, loading: null, src: 'Unplanned', seq: 1, vol: short });
             parts.set(uid, { cargoId: uid, cargo: ulabel, pricing: UNPLANNED, grade: g, bench: benchOf(g), src: 'Crude', vol: short });
             cargoUse.push({ cargoId: uid, t, month: mk, vol: short });
+            C += need;
+          } else {
+            // Sub-tolerance gap: treat the plan as met by what was actually in tank rather than
+            // inventing a token "unplanned" cargo that rounds to 0 kb in every table.
+            if (short > EPS) tinyGaps.push({ grade: g, t, vol: short });
+            C += consumed;
           }
-          C += need;
         }
         const close = sum(crudeLayers.filter(l => l.grade === g && l.avail <= t).map(l => l.rem));
         crudeClose[g] = close;
@@ -273,7 +285,7 @@
         P += v;
         if (v > 0) {
           const comp = C > 0 ? compList : [{ cargoId: -1, cargo: 'Unattributed', pricing: UNPLANNED, grade: 'Unattributed', bench: 'Unmapped', src: 'Crude', share: 1 }];
-          prodLayers.push({ id: plid++, product: p, type: 'Production', a: t, half: 0, avail: t, label: 'Prod ' + fmtMonth(mk), prodKey: mk, vol: v, rem: v, comp });
+          prodLayers.push({ id: plid++, product: p, type: 'Production', kind: 'Production', a: t, half: 0, avail: t, label: 'Prod ' + fmtMonth(mk), prodKey: mk, vol: v, rem: v, comp });
         }
       });
       producedByMonth[t] = P;
@@ -294,10 +306,10 @@
           const { draws, short } = drawFifo(avail, need);
           draws.forEach(d => {
             soldVol += d.vol;
-            sales.push({ product: p, sale: mk, layer: d.layer.label, type: d.layer.type, vol: d.vol });
+            sales.push({ product: p, pbench: pBenchOf(p), sale: mk, layer: d.layer.label, type: d.layer.type, kind: d.layer.kind, opening: !!d.layer.opening, prodKey: d.layer.prodKey, vol: d.vol });
             d.layer.comp.forEach(c => {
               const v = d.vol * c.share;
-              if (v > EPS) expRows.push({ stage: 'Sold', product: p, pbench: pBenchOf(p), sale: mk, layer: d.layer.label, prodKey: prodKeyOf(d.layer), cargoId: c.cargoId == null ? null : c.cargoId, cargo: c.cargo || '', src: c.src, pricing: c.pricing, grade: c.grade, bench: c.bench, vol: v });
+              if (v > EPS) expRows.push({ stage: 'Sold', product: p, pbench: pBenchOf(p), kind: d.layer.kind, sale: mk, layer: d.layer.label, prodKey: prodKeyOf(d.layer), cargoId: c.cargoId == null ? null : c.cargoId, cargo: c.cargo || '', src: c.src, pricing: c.pricing, grade: c.grade, bench: c.bench, vol: v });
             });
           });
           if (short > 0) { unmetVol = short; unmet.push({ product: p, t, vol: short }); }
@@ -315,7 +327,7 @@
         crudeInv.push({ t, month: mk, grade: l.grade, pricing: l.pricing, src: l.src, vol: l.rem });
       });
       prodLayers.filter(l => l.avail <= t && l.rem > EPS).forEach(l => {
-        prodInv.push({ t, month: mk, product: l.product, layer: l.label, type: l.type, vol: l.rem });
+        prodInv.push({ t, month: mk, product: l.product, pbench: pBenchOf(l.product), layer: l.label, type: l.type, kind: l.kind, vol: l.rem });
         l.comp.forEach(c => snap.push({ kind: 'Product inventory', product: l.product, pbench: pBenchOf(l.product), src: c.src, pricing: c.pricing, grade: c.grade, bench: c.bench, vol: l.rem * c.share }));
       });
       snaps.push(snap);
@@ -323,21 +335,23 @@
 
     // ---------- end of horizon: what is still unsold ----------
     crudeLayers.filter(l => l.rem > EPS).forEach(l => {
-      expRows.push({ stage: 'Unconsumed crude', product: '', pbench: '', sale: END, layer: 'Crude inventory', prodKey: 'Not yet consumed', cargoId: l.id, cargo: l.label, src: 'Crude', pricing: l.pricing, grade: l.grade, bench: l.bench, vol: l.rem });
+      expRows.push({ stage: 'Unconsumed crude', product: '', pbench: '', kind: 'Crude', sale: END, layer: 'Crude inventory', prodKey: 'Not yet consumed', cargoId: l.id, cargo: l.label, src: 'Crude', pricing: l.pricing, grade: l.grade, bench: l.bench, vol: l.rem });
     });
     prodLayers.filter(l => l.rem > EPS).forEach(l => {
-      l.comp.forEach(c => expRows.push({ stage: 'Unsold product', product: l.product, pbench: pBenchOf(l.product), sale: END, layer: l.label, prodKey: prodKeyOf(l), cargoId: c.cargoId == null ? null : c.cargoId, cargo: c.cargo || '', src: c.src, pricing: c.pricing, grade: c.grade, bench: c.bench, vol: l.rem * c.share }));
-      sales.push({ product: l.product, sale: END, layer: l.label, type: l.type, vol: l.rem });
+      l.comp.forEach(c => expRows.push({ stage: 'Unsold product', product: l.product, pbench: pBenchOf(l.product), kind: l.kind, sale: END, layer: l.label, prodKey: prodKeyOf(l), cargoId: c.cargoId == null ? null : c.cargoId, cargo: c.cargo || '', src: c.src, pricing: c.pricing, grade: c.grade, bench: c.bench, vol: l.rem * c.share }));
+      sales.push({ product: l.product, pbench: pBenchOf(l.product), sale: END, layer: l.label, type: l.type, kind: l.kind, opening: !!l.opening, prodKey: l.prodKey, vol: l.rem });
     });
 
     // ---------- display order of product layers (chronological) ----------
     const lorder = new Map();
     prodLayers.forEach(l => {
       const within = l.type === 'Purchase' ? (l.half === 2 ? 3 : 1) : 2;
-      const k = l.type === 'Opening' ? [-10000, l.comp[0].pricing] : [l.a, within];
+      const k = l.type === 'Opening' ? [-10000, l.comp[0].pricing, 0] : [l.a, within, l.type === 'Purchase' ? l.comp[0].pricing : 0];
       if (!lorder.has(l.label)) lorder.set(l.label, k);
     });
-    const layerOrder = [...lorder.entries()].sort((x, y) => x[1][0] - y[1][0] || x[1][1] - y[1][1]).map(x => x[0]);
+    const layerOrder = [...lorder.entries()].sort((x, y) => x[1][0] - y[1][0] || x[1][1] - y[1][1] || x[1][2] - y[1][2]).map(x => x[0]);
+    const layerType = {};   // label -> Production | Purchase | Opening (for the row-source filter)
+    prodLayers.forEach(l => { if (!(l.label in layerType)) layerType[l.label] = l.kind; });
 
     if (inp.productPurchases.length) {
       const n2 = inp.productPurchases.filter(r => r.half === 2).length;
@@ -353,6 +367,10 @@
       const byG = {};
       shortfalls.forEach(s => { (byG[s.grade] = byG[s.grade] || []).push(`${fmtMonth(months[s.t])} ${s.vol.toFixed(0)} kb`); });
       Object.keys(byG).forEach(g => add('warn', `Crude shortfall: ${g}`, byG[g].join('; ') + '. Needs additional purchases - shown as "Unplanned" pricing.'));
+    }
+    if (tinyGaps.length) {
+      const tot = sum(tinyGaps.map(x => x.vol));
+      add('info', 'Tiny crude gaps ignored', `${tinyGaps.length} month/grade combination(s) were short by less than the ${TOL} kb tolerance (${tot.toFixed(4)} kb in total) - treated as rounding, not as unplanned crude. Change the tolerance in Settings to see them.`);
     }
     if (unmet.length) {
       const byP = {};
@@ -395,8 +413,9 @@
     };
 
     return { months, pStart, productStart: months[pStart], grades, products, crudeBench, prodBench, expRows, sales, snaps, prodInv, crudeInv, crudeBal, prodBal, unmet, shortfalls,
-      consumedByMonth, producedByMonth, sold, demand, production, checks, summary, notes, layerOrder, priority: prio, cargoUse,
-      cargoes: crudeLayers.map(l => ({ id: l.id, label: l.label, grade: l.grade, bench: l.bench, pricing: l.pricing, arrival: l.arrival == null ? null : l.arrival, src: l.src, vol: l.vol })).concat(extraCargo) };
+      consumedByMonth, producedByMonth, sold, demand, production, checks, summary, notes, layerOrder, layerType, priority: prio, cargoUse, tinyGaps, tolerance: TOL,
+      cargoes: crudeLayers.map(l => ({ id: l.id, label: l.label, grade: l.grade, bench: l.bench, pricing: l.pricing,
+        arrival: l.arrival == null ? null : l.arrival, loading: l.loading == null ? null : l.loading, src: l.src, seq: l.seq, vol: l.vol })).concat(extraCargo) };
   }
 
   // ---------- pivot ----------
