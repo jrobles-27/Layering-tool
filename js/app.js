@@ -48,7 +48,7 @@
   const S = {
     page: 'data', input: null, R: null, issues: [], file: '', win: null, priority: E.DEFAULT_PRIORITY.slice(),
     f: { crude: { bench: '', grade: '', pbench: '', dim: 'pricing' }, prod: { bench: '', kind: '' }, margin: { show: 'vol' }, me: { dim: 'pricing', kind: '', bench: '' }, pct: { row: 'pricing', col: 'sale', basis: 'col' }, cargo: { mode: 'prod', show: 'vol', cargoId: '' }, dash: { dim: 'pricing', month: null }, bal: {} },
-    charts: [], after: [], priceColors: {}, tbl: {}, tolerance: 0.5, showLoading: true
+    charts: [], after: [], priceColors: {}, tbl: {}, tolerance: 0.5, showLoading: true, crudeOrder: 'arrival'
   };
 
   const PAGES = [
@@ -128,32 +128,41 @@
     const di = o.dim ? dimInfo(o.dim) : { fmt: o.rowFmt || (x => x), color: null };
     if (o.rowFmt && o.dim) di.fmt = o.rowFmt;
     const d = o.dec || 0;
-    const lead = o.rowCols || [{ label: o.rowHdr || '', get: rk => di.fmt(rk) }];
+    // Leading columns carry their own sort key, so month columns sort chronologically, not as text.
+    const lead = o.rowCols || [{ label: o.rowHdr || '', get: rk => di.fmt(rk), key: rk => rk }];
     const cols = pv.colKeys.map((ck, j) => [ck, j]).filter(([ck, j]) => typeof ck === 'number' || pv.colTotals[j] > 1e-9);
     let rows = pv.rowKeys.map((rk, i) => [rk, i]).filter(([rk, i]) => pv.rowTotals[i] > 1e-9 || o.keepEmpty);
     // filter on the text of the leading columns
     const q = st.filter.trim().toLowerCase();
     if (q) rows = rows.filter(([rk]) => lead.some(c => String(c.get(rk)).toLowerCase().includes(q)));
-    // sort: index -1 = leading columns (as text), 0..n-1 = data columns, n = Total
+    // sort: "L<i>" = leading column i (by its own key), "<j>" = data column j, "T" = Total
     if (st.sort) {
       const { col, dir } = st.sort;
-      const keyOf = ([rk, i]) => col === -1 ? lead.map(c => String(c.get(rk))).join(' ')
-        : col === cols.length ? pv.rowTotals[i] : pv.get(rk, cols[col][0]);
+      const keyOf = ([rk, i]) => {
+        if (col === 'T') return pv.rowTotals[i];
+        if (typeof col === 'string' && col[0] === 'L') {
+          const c = lead[+col.slice(1)];
+          return c ? (c.key ? c.key(rk) : String(c.get(rk))) : '';
+        }
+        return pv.get(rk, cols[col][0]);
+      };
       rows = rows.slice().sort((a, b) => {
         const x = keyOf(a), y = keyOf(b);
-        const c = typeof x === 'string' ? x.localeCompare(y) : x - y;
+        const nx = typeof x === 'number', ny = typeof y === 'number';
+        // numbers (months, volumes) sort numerically and come before text labels
+        const c = nx && ny ? x - y : nx ? -1 : ny ? 1 : String(x).localeCompare(String(y));
         return dir === 'asc' ? c : -c;
       });
     }
     let max = 0;
     rows.forEach(([rk]) => cols.forEach(([ck]) => { max = Math.max(max, pv.get(rk, ck)); }));
-    const arrow = i => st.sort && st.sort.col === i ? `<i class="sa">${st.sort.dir === 'asc' ? '▲' : '▼'}</i>` : '';
+    const arrow = i => st.sort && String(st.sort.col) === String(i) ? `<i class="sa">${st.sort.dir === 'asc' ? '▲' : '▼'}</i>` : '';
     const span = lead.length;
     const tall = rows.length > 12 ? ' tall' : '';
     let h = `<div class="tbl-wrap${tall}"><table class="m"><thead><tr>` +
-      lead.map((c, i) => `<th class="lead" data-tbl-sort="${id}|-1">${esc(c.label)}${i === 0 ? arrow(-1) : ''}</th>`).join('') +
+      lead.map((c, i) => `<th class="lead" data-tbl-sort="${id}|L${i}">${esc(c.label)}${arrow('L' + i)}</th>`).join('') +
       cols.map(([ck], j) => `<th data-tbl-sort="${id}|${j}">${esc(o.colFmt ? o.colFmt(ck) : fm(ck))}${arrow(j)}</th>`).join('') +
-      `<th class="tot" data-tbl-sort="${id}|${cols.length}">Total${arrow(cols.length)}</th></tr></thead><tbody>`;
+      `<th class="tot" data-tbl-sort="${id}|T">Total${arrow('T')}</th></tr></thead><tbody>`;
     rows.forEach(([rk, i], ri) => {
       const sw = o.rowColor ? `<span class="sw" style="background:${o.rowColor(rk)}"></span>` : (o.dim && di.color ? `<span class="sw" style="background:${di.color(rk, ri)}"></span>` : '');
       h += '<tr>' + lead.map((c, li) => `<td class="lead">${li === 0 ? sw : ''}${esc(c.get(rk))}</td>`).join('');
@@ -191,7 +200,8 @@
             tooltip: {   // only series that actually have a value at this point, largest first
               filter: it => Math.abs(it.parsed.y) > 1e-9,
               callbacks: { label: c => unit === '%' ? ` ${c.dataset.label}: ${fmt(c.parsed.y, 1)}%` : ` ${c.dataset.label}: ${cell(c.parsed.y, 0)} kb` },
-              itemSort: (a, b) => b.parsed.y - a.parsed.y
+              // keep the series in their own order (oldest month first) rather than ranking by size
+              itemSort: (a, b) => a.datasetIndex - b.datasetIndex
             }
           },
           scales: {
@@ -311,12 +321,26 @@
 
   /** Leading columns for the cargo tables: grade, loading, arrival and pricing month each get their own. */
   function cargoCols(R, byId) {
-    const cols = [{ label: 'Crude grade', get: id => (byId.get(id) || {}).grade || String(id) }];
-    if (S.showLoading) cols.push({ label: 'Loading month', get: id => { const c = byId.get(id); return c && c.loading != null ? fm(c.loading) : '–'; } });
-    cols.push({ label: 'Arrival month', get: id => { const c = byId.get(id); return c ? (c.arrival == null ? (c.src === 'Opening' ? 'Opening stock' : 'Unplanned') : fm(c.arrival)) : '–'; } });
-    cols.push({ label: 'Pricing month', get: id => { const c = byId.get(id); return c ? fm(c.pricing) + (c.seq > 1 ? ` #${c.seq}` : '') : '–'; } });
-    cols.push({ label: 'Cargo (kb)', get: id => { const c = byId.get(id); return c ? fmt(c.vol) : '–'; } });
+    const g = id => byId.get(id) || {};
+    const monthKeyOf = v => v == null ? -Infinity : v;   // blanks sort before any month
+    const cols = [{ label: 'Crude grade', get: id => g(id).grade || String(id) }];
+    if (S.showLoading) cols.push({ label: 'Loading month', get: id => g(id).loading != null ? fm(g(id).loading) : '–', key: id => monthKeyOf(g(id).loading) });
+    cols.push({ label: 'Arrival month', get: id => { const c = g(id); return c.arrival == null ? (c.src === 'Opening' ? 'Opening stock' : 'Unplanned') : fm(c.arrival); }, key: id => monthKeyOf(g(id).arrival) });
+    cols.push({ label: 'Pricing month', get: id => { const c = g(id); return fm(c.pricing) + (c.seq > 1 ? ` #${c.seq}` : ''); }, key: id => monthKeyOf(g(id).pricing) });
+    cols.push({ label: 'Cargo (kb)', get: id => fmt(g(id).vol || 0), key: id => g(id).vol || 0 });
     return cols;
+  }
+
+  /** Product layer rows split into their own columns (source, month, half, pricing month). */
+  function layerCols(R) {
+    const inf = l => R.layerInfo[l] || {};
+    const mk = v => v == null ? -Infinity : v;
+    return [
+      { label: 'Source', get: l => { const i = inf(l); return (i.kind || '–') + (i.opening ? ' (opening stock)' : ''); }, key: l => (inf(l).kind || '') + (inf(l).opening ? ' 0' : ' 1') },
+      { label: 'Production / arrival month', get: l => inf(l).month != null ? fm(inf(l).month) : '–', key: l => mk(inf(l).month) },
+      { label: 'Half', get: l => inf(l).half === 2 ? '2nd' : inf(l).half === 1 ? '1st' : '–', key: l => inf(l).half || 0 },
+      { label: 'Pricing month', get: l => inf(l).pricing != null ? fm(inf(l).pricing) : 'Crude blend', key: l => mk(inf(l).pricing) }
+    ];
   }
 
   function cargoSection(filt) {
@@ -398,9 +422,9 @@
       <div class="field"><label>Rows</label>${seg('prod.kind', f.kind, [['', 'All sources'], ['Production', 'Production'], ['Purchase', 'Purchase']])}</div></div>`;
     return priorityCard() + card('Product layering - sales by source',
         `Volume (kb) sold in each month (columns) from each opening / production / purchase layer (rows), following the sales priority above. Purchases are separate rows per pricing month.${f.kind ? ` Showing ${kindLabel[f.kind]} rows only.` : ''}`,
-        sel + matrix(pv, { id: 'prodlayer', rowHdr: 'Source layer', rowFmt: x => x }), tableTools('prodlayer'), true) +
+        sel + matrix(pv, { id: 'prodlayer', rowCols: layerCols(R) }), tableTools('prodlayer'), true) +
       `<div class="grid g2">${card('Sales by source layer', '', barChart('c_prod', ser.labels, ser.series, true))}
-       ${card('Month-end inventory by layer', 'What is left in tanks at each month-end, by the layer it came from.', matrix(inv, { id: 'prodinv', rowHdr: 'Source layer', rowFmt: x => x }), tableTools('prodinv'), true)}</div>` +
+       ${card('Month-end inventory by layer', 'What is left in tanks at each month-end, by the layer it came from.', matrix(inv, { id: 'prodinv', rowCols: layerCols(R) }), tableTools('prodinv'), true)}</div>` +
       card('Product summary', `Display window, kb, grouped by benchmark. Products sharing a benchmark (e.g. Jet and Kerosene) are reported together.`, sumTbl, '', true);
   }
 
@@ -523,10 +547,12 @@
     const nCargo = R.cargoes.filter(c => c.loading != null).length;
     const opt = `<div class="filters" style="padding:4px 0 0">
         <div class="field"><label>Zero tolerance (kb)</label><input class="num" type="number" min="0" step="0.1" data-opt="tolerance" value="${S.tolerance}"></div>
+        <div class="field"><label>Crude consumption order</label>${seg('opt.crudeOrder', S.crudeOrder, [['arrival', 'Arrival month'], ['pricing', 'Pricing month']])}</div>
         <div class="field"><label>Loading month column</label>${seg('opt.showLoading', S.showLoading ? 'on' : 'off', [['on', 'Show'], ['off', 'Hide']])}</div>
       </div>
       <div class="how" style="margin-top:14px">
         <p style="margin:0 0 6px"><b>Zero tolerance</b> - a crude shortfall smaller than this is treated as rounding rather than unplanned crude, so it no longer appears as a 0 kb "Unplanned" row. Ignored gaps are still listed in Data Checks. ${R.tinyGaps.length ? `<span class="c-amber">${R.tinyGaps.length} gap(s) currently ignored.</span>` : 'No gaps are currently being ignored.'}</p>
+        <p style="margin:0 0 6px"><b>Crude consumption order</b> - which layer of a grade is run first. <b>Arrival month</b> is physical FIFO: whatever arrived first is consumed first. <b>Pricing month</b> runs the oldest priced layer first. They only differ when the pricing lag varies between cargoes; if your manual numbers disagree with the tool, this is the first thing to check.</p>
         <p style="margin:0"><b>Loading month</b> - shown beside arrival month in the cargo tables and the export. Availability and FIFO always follow the arrival and pricing months. ${nCargo ? `${nCargo} cargo(es) have a loading month.` : 'No cargo in this file has a loading month; add a "Loading Month" column to Crude Imports.'}</p>
       </div>`;
     return card('Display months', 'Choose the first and last month to show. Defaults to the product horizon, so crude-only months before it are folded away.', body) +
@@ -572,7 +598,7 @@
   }
 
   // ---------- data loading ----------
-  function rerun() { S.R = E.run(S.input, { priority: S.priority, tolerance: S.tolerance }); buildColors(); }
+  function rerun() { S.R = E.run(S.input, { priority: S.priority, tolerance: S.tolerance, crudeOrder: S.crudeOrder }); buildColors(); }
   function setData(sheets, name) {
     const res = P.parseSheets(sheets);
     S.issues = res.issues;
@@ -599,7 +625,10 @@
   // ---------- events ----------
   function setPath(path, val) {
     const [a, b] = path.split('.');
-    if (a === 'opt') { S[b] = val === 'on'; return; }
+    if (a === 'opt') {
+      if (b === 'crudeOrder') { S.crudeOrder = val; rerun(); return; }
+      S[b] = val === 'on'; return;
+    }
     if (a === 'win') {   // display window: keep start <= end
       const cur = WIN(), v = +val;
       S.win = { start: cur.start, end: cur.end }; S.win[b] = v;
@@ -613,10 +642,12 @@
   }
   document.addEventListener('click', e => {
     const sh = e.target.closest('[data-tbl-sort]');
-    if (sh) {   // click a header: desc -> asc -> off
-      const [id, c] = sh.dataset.tblSort.split('|'), col = +c, st = tstate(id);
-      st.sort = !st.sort || st.sort.col !== col ? { col, dir: col === -1 ? 'asc' : 'desc' }
-        : st.sort.dir === (col === -1 ? 'asc' : 'desc') ? { col, dir: col === -1 ? 'desc' : 'asc' } : null;
+    if (sh) {   // click a header: label columns start ascending, value columns descending; then flip, then off
+      const [id, c] = sh.dataset.tblSort.split('|'), st = tstate(id);
+      const col = /^[0-9]+$/.test(c) ? +c : c;
+      const first = typeof col === 'string' && col[0] === 'L' ? 'asc' : 'desc';
+      st.sort = !st.sort || String(st.sort.col) !== String(col) ? { col, dir: first }
+        : st.sort.dir === first ? { col, dir: first === 'asc' ? 'desc' : 'asc' } : null;
       return render();
     }
     const rs = e.target.closest('[data-tbl-reset]');
@@ -673,7 +704,7 @@
   $('#menuBtn').innerHTML = I('menu');
   $('#exportTop').innerHTML = I('download') + 'Export';
   const setTheme = t => { document.documentElement.setAttribute('data-theme', t); $('#theme').innerHTML = I(t === 'dark' ? 'sun' : 'moon'); };
-  setTheme('dark');
+  setTheme('light');
   $('#theme').addEventListener('click', () => { setTheme(document.documentElement.getAttribute('data-theme') === 'dark' ? 'light' : 'dark'); render(); });
   $('#collapse').addEventListener('click', () => $('#app').classList.toggle('collapsed'));
   $('#menuBtn').addEventListener('click', () => $('#app').classList.toggle('mobile-open'));

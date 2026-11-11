@@ -394,6 +394,77 @@ near(onlyProd.total + onlyBuy.total, V.productLayering(R, '').total, 'production
 const oneBench = V.productLayering(R, 'MOPS Jet/Kero');
 near(oneBench.total, sum(R.sales.filter(x => x.pbench === 'MOPS Jet/Kero').map(x => x.vol)), 'benchmark filter on product layering');
 
+// ---------- 5i. month-end never counts a future pricing month ----------
+// A cargo that has arrived but is priced later is physically in tank yet carries no price exposure.
+const kO2 = k(2026, 10), kN2 = k(2026, 11), kJ2 = k(2027, 0);
+const lateP = E.run({
+  months: [kO2, kN2, kJ2], productStart: kJ2,
+  crudes: [{ grade: 'A', benchmark: 'B', consumption: { [kJ2]: 100 } }],
+  products: [{ product: 'P', benchmark: 'C', production: { [kJ2]: 100 } }],
+  openCrude: [], openProducts: [],
+  crudeImports: [{ grade: 'A', arrival: kO2, pricing: kN2, volume: 500, benchmark: '' }],
+  productPurchases: [], demand: [{ product: 'P', demand: { [kJ2]: 50 } }]
+});
+const lme = V.monthEnd(lateP, 'pricing', '', {}, { start: kO2, end: kJ2 });
+near(lme.get(E.UNPRICED, kO2), 500, 'arrived but unpriced: shown as "Not yet priced" at that month-end');
+near(lme.get(kN2, kO2), 0, 'the future pricing month shows nothing in the earlier month-end');
+near(lme.get(kN2, kN2), 500, 'once the pricing month arrives it is priced exposure');
+near(lme.get(E.UNPRICED, kN2), 0, 'and no longer unpriced');
+ok(lateP.unpricedAtEnd.length === 1 && lateP.checks.some(c => /not yet priced/i.test(c.title)), 'unpriced crude is reported in the checks');
+// totals still tie to the physical closing stock: nothing is dropped, only relabelled
+lateP.months.forEach((mk, t) => {
+  const snapTot = sum(lateP.snaps[t].map(r => r.vol));
+  const inv = sum(lateP.crudeBal.filter(b => b.t === t).map(b => b.close)) + sum(lateP.prodBal.filter(b => b.t === t).map(b => b.close));
+  near(snapTot, inv, 'relabelling does not change the month-end total at ' + E.fmtMonth(mk));
+});
+// the demo prices every cargo before arrival, so nothing is ever unpriced there
+ok(R.unpricedAtEnd.length === 0, 'demo has no unpriced month-end crude');
+R.snaps.forEach((sn, t) => sn.forEach(r => {
+  if (typeof r.pricing === 'number' && r.pricing !== E.PRE && r.pricing !== E.UNPLANNED && r.pricing !== E.UNPRICED)
+    ok(r.pricing <= R.months[t], 'no future pricing month in a month-end snapshot');
+}));
+
+// ---------- 5j. crude consumption order: arrival (default) vs pricing ----------
+// Grade A, one consumption month. Two cargoes already in tank:
+//   cargo X arrived Jan, priced Feb (short lag);  cargo Y arrived Feb, priced Jan (long lag).
+// Arrival order runs X first; pricing order runs Y first. 100 kb is consumed, each cargo is 80 kb.
+const kJa = k(2027, 0), kFe = k(2027, 1), kMa = k(2027, 2);
+const mixIn = {
+  months: [kJa, kFe, kMa], productStart: kMa,
+  crudes: [{ grade: 'A', benchmark: 'B', consumption: { [kMa]: 100 } }],
+  products: [{ product: 'P', benchmark: 'C', production: { [kMa]: 100 } }],
+  openCrude: [], openProducts: [],
+  crudeImports: [
+    { grade: 'A', arrival: kJa, pricing: kFe, volume: 80, benchmark: '' },   // X
+    { grade: 'A', arrival: kFe, pricing: kJa, volume: 80, benchmark: '' }    // Y
+  ],
+  productPurchases: [], demand: [{ product: 'P', demand: { [kMa]: 100 } }]
+};
+const byArr = E.run(mixIn), byPrc = E.run(mixIn, { crudeOrder: 'pricing' });
+ok(byArr.crudeOrder === 'arrival', 'arrival order is the default');
+const pa = E.pivot(byArr.expRows.filter(r => r.stage === 'Sold'), r => r.pricing, r => r.sale);
+const pp2 = E.pivot(byPrc.expRows.filter(r => r.stage === 'Sold'), r => r.pricing, r => r.sale);
+// arrival order: all 80 of X (priced Feb) then 20 of Y (priced Jan)
+near(pa.get(kFe, kMa), 80, 'arrival order: 80 kb of the Jan-arriving / Feb-priced cargo is sold');
+near(pa.get(kJa, kMa), 20, 'arrival order: 20 kb of the Feb-arriving / Jan-priced cargo is sold');
+// pricing order: all 80 of Y (priced Jan) then 20 of X (priced Feb)
+near(pp2.get(kJa, kMa), 80, 'pricing order: the Jan-priced cargo goes first');
+near(pp2.get(kFe, kMa), 20, 'pricing order: only 20 kb of the Feb-priced cargo');
+ok(pa.get(kFe, kMa) !== pp2.get(kFe, kMa), 'the two orders really do give different pricing x sales results');
+near(byArr.summary.totalSold, byPrc.summary.totalSold, 'but the same total volume is sold');
+near(byArr.summary.endCrude, byPrc.summary.endCrude, 'and the same crude is left');
+
+// ---------- 5k. layer columns (product layering rows split into fields) ----------
+const li = R.layerInfo;
+ok(Object.keys(li).length === R.layerOrder.length, 'every layer has its parts recorded');
+const aPurch = R.layerOrder.find(l => R.layerType[l] === 'Purchase' && !li[l].opening);
+ok(li[aPurch].kind === 'Purchase' && typeof li[aPurch].arrival === 'number' && typeof li[aPurch].pricing === 'number' && li[aPurch].half > 0,
+  'a purchase row carries source, arrival month, half and pricing month separately');
+const aProd = R.layerOrder.find(l => R.layerType[l] === 'Production' && !li[l].opening);
+ok(li[aProd].kind === 'Production' && typeof li[aProd].month === 'number' && li[aProd].pricing === null, 'a production row has a production month and a blended price');
+const anOpen = R.layerOrder.find(l => li[l].opening && R.layerType[l] === 'Production');
+ok(anOpen && li[anOpen].opening === true && typeof li[anOpen].month === 'number', 'opening production keeps its production month');
+
 // ---------- 6. robustness ----------
 const bad = P.parseAoa([['', 'Crude Consumption Plan'], ['', 'Crude Grade', 'Nov-26'], ['', 'X', 10]]);
 ok(!bad.ok, 'missing sheets flagged as error');

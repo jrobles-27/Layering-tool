@@ -39,11 +39,18 @@ Crude grade, product and benchmark names are matched ignoring case and extra spa
 
 - **Display from / to** (default: the product horizon). Flow tables (sales and production month axes, percentages, cargo analysis) fold months outside the window into **Earlier months** / **Later months** columns so totals still tie; stock tables (month-end exposure, inventory, balances) and the margin tables show only the window. The dashboard figures and the Excel export follow the window; calculations always use the whole timeline.
 - **Zero tolerance** (default 0.5 kb). A crude shortfall smaller than this is treated as rounding rather than unplanned crude, so it no longer appears as a 0 kb "Unplanned" row. Ignored gaps are still listed in Data Checks.
+- **Crude consumption order** (default: arrival month). Which layer of a grade is drawn down first — physical FIFO by arrival, or oldest priced layer first. The two only differ when the pricing lag varies between cargoes, and they change the pricing x sales result, so this is the first setting to check if hand calculations disagree.
 - **Loading month** show/hide in the cargo tables.
 
 ## Tables
 
-Every analysis table has sortable column headers (click once for descending, again for ascending, then a reset button), a row filter box, and — for long tables — a sticky header row and first column inside their own scroll area. A value that is not zero but would round to zero shows as `<1`, never a misleading `0`.
+Every analysis table has sortable column headers (click once for descending, again for ascending, then a reset button), a row filter box, and — for long tables — a sticky header row and first column inside their own scroll area. Month columns sort chronologically, not alphabetically. A value that is not zero but would round to zero shows as `<1`, never a misleading `0`.
+
+Row labels are split into their own columns rather than packed into one string, so they can be sorted and filtered individually: cargoes by crude grade / loading / arrival / pricing month, and product layers by source / production or arrival month / half / pricing month.
+
+## Month-end exposure
+
+A month-end column counts a barrel only once it is both in tank and priced. Crude that has arrived but whose pricing month is still ahead appears under **Not yet priced** instead of against that future month, so a month-end never shows exposure to a price that has not been set yet. Nothing is dropped — the total still ties to the closing stock on the Balances page — and the volumes are listed in Data Checks.
 
 ## Products and benchmarks
 
@@ -51,7 +58,7 @@ All product analysis is grouped by **product benchmark**, so products priced off
 
 ## Method
 
-1. Crude is consumed FIFO per grade (oldest pricing month first).
+1. Crude is consumed FIFO per grade, in arrival order by default (ties broken by pricing month); switchable to pricing order in Settings.
 2. Each month's production is a pro-rata blend of the crude consumed that month (yields are not grade-specific).
 3. Products are sold in a configurable **sales priority**. Stock older than the previous month (opening purchases, and production from before then) always goes first, oldest first; opening production from the month before the product data starts counts as "previous month's production". Then, by default: 1) previous month's production, 2) previous month's imports, 3) current month's imports arriving 1st-15th, 4) current month's production, 5) current month's imports arriving 16th-month end. Reorder these on the Product Layering page.
 4. Each sale is traced back to the crude pricing month(s) behind it -> pricing month x sales month matrix.

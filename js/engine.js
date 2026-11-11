@@ -16,6 +16,7 @@
   const MON = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
   const PRE = 0;
   const UNPLANNED = 1e9;
+  const UNPRICED = 1e9 - 1;    // in tank at this month-end but its pricing month has not arrived yet
   const END = 'END';
   const EARLIER = 'EARLIER';   // display bucket: months before the display window
   const LATER = 'LATER';       // display bucket: months after the display window
@@ -23,6 +24,7 @@
 
   function fmtMonth(k) {
     if (k === PRE) return 'Pre-horizon';
+    if (k === UNPRICED) return 'Not yet priced';
     if (k === UNPLANNED) return 'Unplanned';
     if (k === END) return 'Unsold at end';
     if (k === EARLIER) return 'Earlier months';
@@ -70,6 +72,15 @@
     // Volumes at or below this are rounding noise, not real gaps: a crude shortfall smaller than this
     // does not become an "unplanned" cargo (it would otherwise show as a 0 kb row after rounding).
     const TOL = opts && opts.tolerance != null && isFinite(opts.tolerance) && opts.tolerance >= 0 ? +opts.tolerance : 0.5;
+    // Order in which crude layers of a grade are drawn down. 'arrival' = physical FIFO (what arrived
+    // first is run first), 'pricing' = oldest priced layer first. These differ whenever the pricing
+    // lag is not the same for every cargo.
+    const crudeOrder = (opts && opts.crudeOrder) === 'pricing' ? 'pricing' : 'arrival';
+    const drawOrder = crudeOrder === 'pricing'
+      ? (a, b) => a.pricing - b.pricing || a.avail - b.avail || a.id - b.id
+      : (a, b) => a.avail - b.avail || a.pricing - b.pricing || a.id - b.id;
+    /** A layer only carries price exposure once its pricing month has arrived. */
+    const pricedAt = (pricing, mk) => (typeof pricing === 'number' && pricing !== PRE && pricing !== UNPLANNED && pricing > mk) ? UNPRICED : pricing;
     const posOf = new Map(prio.map((c, i) => [c, i]));
     const catOf = (L, t) => {
       const d = t - L.a;
@@ -223,6 +234,7 @@
     const unmet = [];       // {product,t,vol}
     const shortfalls = [];  // {grade,t,vol}
     const tinyGaps = [];    // sub-tolerance crude gaps, reported but not turned into cargoes
+    const unpricedAtEnd = [];   // in tank at a month-end but not yet priced
     const consumedByMonth = new Array(T).fill(0);
     const producedByMonth = new Array(T).fill(0);
     const sold = {}; products.forEach(p => { sold[p] = new Array(T).fill(0); });
@@ -246,8 +258,7 @@
         const open = crudeClose[g];
         let consumed = 0, shortVol = 0;
         if (need > 0) {
-          const avail = crudeLayers.filter(l => l.grade === g && l.avail <= t && l.rem > EPS)
-            .sort((a, b) => a.pricing - b.pricing || a.avail - b.avail || a.id - b.id);
+          const avail = crudeLayers.filter(l => l.grade === g && l.avail <= t && l.rem > EPS).sort(drawOrder);
           const { draws, short } = drawFifo(avail, need);
           draws.forEach(d => {
             consumed += d.vol;
@@ -322,13 +333,17 @@
 
       // --- month-end snapshots ---
       const snap = [];
+      // Month-end exposure: a barrel in tank whose pricing month is still in the future is not yet
+      // price-exposed, so it is reported as "Not yet priced" rather than against that future month.
       crudeLayers.filter(l => l.avail <= t && l.rem > EPS).forEach(l => {
-        snap.push({ kind: 'Crude inventory', product: '', pbench: '', src: 'Crude', pricing: l.pricing, grade: l.grade, bench: l.bench, vol: l.rem });
-        crudeInv.push({ t, month: mk, grade: l.grade, pricing: l.pricing, src: l.src, vol: l.rem });
+        const pk = pricedAt(l.pricing, mk);
+        if (pk === UNPRICED) unpricedAtEnd.push({ t, month: mk, grade: l.grade, pricing: l.pricing, vol: l.rem });
+        snap.push({ kind: 'Crude inventory', product: '', pbench: '', src: 'Crude', pricing: pk, grade: l.grade, bench: l.bench, vol: l.rem });
+        crudeInv.push({ t, month: mk, grade: l.grade, pricing: pk, src: l.src, vol: l.rem });
       });
       prodLayers.filter(l => l.avail <= t && l.rem > EPS).forEach(l => {
         prodInv.push({ t, month: mk, product: l.product, pbench: pBenchOf(l.product), layer: l.label, type: l.type, kind: l.kind, vol: l.rem });
-        l.comp.forEach(c => snap.push({ kind: 'Product inventory', product: l.product, pbench: pBenchOf(l.product), src: c.src, pricing: c.pricing, grade: c.grade, bench: c.bench, vol: l.rem * c.share }));
+        l.comp.forEach(c => snap.push({ kind: 'Product inventory', product: l.product, pbench: pBenchOf(l.product), src: c.src, pricing: pricedAt(c.pricing, mk), grade: c.grade, bench: c.bench, vol: l.rem * c.share }));
       });
       snaps.push(snap);
     }
@@ -351,7 +366,19 @@
     });
     const layerOrder = [...lorder.entries()].sort((x, y) => x[1][0] - y[1][0] || x[1][1] - y[1][1] || x[1][2] - y[1][2]).map(x => x[0]);
     const layerType = {};   // label -> Production | Purchase | Opening (for the row-source filter)
-    prodLayers.forEach(l => { if (!(l.label in layerType)) layerType[l.label] = l.kind; });
+    const layerInfo = {};   // label -> the parts of the label as separate fields, for table columns
+    prodLayers.forEach(l => {
+      if (l.label in layerType) return;
+      layerType[l.label] = l.kind;
+      const isProd = l.kind === 'Production';
+      layerInfo[l.label] = {
+        kind: l.kind, opening: !!l.opening,
+        month: isProd ? (typeof l.prodKey === 'number' ? l.prodKey : null) : (l.type === 'Purchase' ? months[Math.min(Math.max(l.a, 0), T - 1)] : null),
+        arrival: l.type === 'Purchase' ? months[Math.min(Math.max(l.a, 0), T - 1)] : null,
+        half: l.half || 0,
+        pricing: isProd ? null : l.comp[0].pricing
+      };
+    });
 
     if (inp.productPurchases.length) {
       const n2 = inp.productPurchases.filter(r => r.half === 2).length;
@@ -367,6 +394,11 @@
       const byG = {};
       shortfalls.forEach(s => { (byG[s.grade] = byG[s.grade] || []).push(`${fmtMonth(months[s.t])} ${s.vol.toFixed(0)} kb`); });
       Object.keys(byG).forEach(g => add('warn', `Crude shortfall: ${g}`, byG[g].join('; ') + '. Needs additional purchases - shown as "Unplanned" pricing.'));
+    }
+    if (unpricedAtEnd.length) {
+      const byM = {};
+      unpricedAtEnd.forEach(x => { byM[fmtMonth(x.month)] = (byM[fmtMonth(x.month)] || 0) + x.vol; });
+      add('info', 'Crude in tank but not yet priced', Object.keys(byM).map(m => `${m}: ${byM[m].toFixed(0)} kb`).join('; ') + '. These cargoes have arrived but their pricing month is later, so they carry no price exposure yet and are shown as "Not yet priced" instead of against a future month.');
     }
     if (tinyGaps.length) {
       const tot = sum(tinyGaps.map(x => x.vol));
@@ -413,7 +445,7 @@
     };
 
     return { months, pStart, productStart: months[pStart], grades, products, crudeBench, prodBench, expRows, sales, snaps, prodInv, crudeInv, crudeBal, prodBal, unmet, shortfalls,
-      consumedByMonth, producedByMonth, sold, demand, production, checks, summary, notes, layerOrder, layerType, priority: prio, cargoUse, tinyGaps, tolerance: TOL,
+      consumedByMonth, producedByMonth, sold, demand, production, checks, summary, notes, layerOrder, layerType, layerInfo, priority: prio, cargoUse, tinyGaps, tolerance: TOL, crudeOrder, unpricedAtEnd,
       cargoes: crudeLayers.map(l => ({ id: l.id, label: l.label, grade: l.grade, bench: l.bench, pricing: l.pricing,
         arrival: l.arrival == null ? null : l.arrival, loading: l.loading == null ? null : l.loading, src: l.src, seq: l.seq, vol: l.vol })).concat(extraCargo) };
   }
@@ -451,6 +483,6 @@
     return { rowKeys, colKeys, get, rowTotals, colTotals, total };
   }
 
-  const api = { run, pivot, fmtMonth, PRE, UNPLANNED, END, EARLIER, LATER, MON, sum, DEFAULT_PRIORITY, PRIORITY_LABELS, validPriority };
+  const api = { run, pivot, fmtMonth, PRE, UNPLANNED, UNPRICED, END, EARLIER, LATER, MON, sum, DEFAULT_PRIORITY, PRIORITY_LABELS, validPriority };
   if (typeof module !== 'undefined' && module.exports) module.exports = api; else root.Engine = api;
 })(typeof window !== 'undefined' ? window : globalThis);

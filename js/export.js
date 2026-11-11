@@ -53,11 +53,14 @@
       ['Total product demand', r3(S.totalDemand)], ['Demand met', r3(S.totalSold)], ['Unmet demand', r3(S.totalUnmet)],
       ['Unplanned crude (shortfall)', r3(S.totalShort)], [],
       ['Method / assumptions'],
-      ['1', 'Crude is consumed FIFO per grade (oldest pricing month first), starting from the first crude month.'],
+      ['1', R.crudeOrder === 'pricing'
+        ? 'Crude is consumed per grade in pricing-month order (oldest priced layer first), starting from the first crude month.'
+        : 'Crude is consumed FIFO per grade in arrival order (what arrived first is run first; ties broken by pricing month), starting from the first crude month.'],
       ['2', 'Each month\'s production is a pro-rata blend of the crude layers consumed that month (yields are not grade-specific). Opening product that was produced in an earlier month carries the crude blend of that month.'],
       ['3', 'Products are sold in this order: stock older than the previous month (incl. opening purchases) first, oldest first; then ' + R.priority.map((c, i) => (i + 1) + ') ' + E.PRIORITY_LABELS[c]).join('; ') + '.'],
       ['4', 'Crude inventory exposure runs from the crude pricing month until the product is sold. Margin (crack) exposure is the volume sold in the sales month.'],
       ['5', '"Pre-horizon" = pricing month not specified; "Unplanned" = crude needed beyond the purchase plan. Shortfalls below the ' + R.tolerance + ' kb tolerance are treated as rounding and ignored.'],
+      ['5b', '"Not yet priced" = in tank at that month-end but its pricing month has not arrived, so it carries no price exposure yet. Month-end exposure never counts a future pricing month.'],
       ['6', 'Crude grade, product and benchmark names are matched ignoring case and extra spaces, so "ARAB  Light" and "Arab Light" are one grade.'],
       ['7', 'Product analysis is grouped by product benchmark: products priced off the same index (e.g. Jet and Kerosene) are reported together. Physical layering stays per product.']
     ];
@@ -123,7 +126,13 @@
     X.utils.book_append_sheet(wb, sheet(det), 'Crude Layering Detail');
 
     // ---- product layering (grouped by product benchmark) ----
-    const lead = [{ label: 'Source layer', get: id }, { label: 'Layer source', get: l => R.layerType[l] || '' }];
+    const linf = l => R.layerInfo[l] || {};
+    const lead = [
+      { label: 'Source', get: l => (linf(l).kind || '') + (linf(l).opening ? ' (opening stock)' : '') },
+      { label: 'Production / arrival month', get: l => linf(l).month != null ? fm(linf(l).month) : '' },
+      { label: 'Half', get: l => linf(l).half === 2 ? '2nd' : linf(l).half === 1 ? '1st' : '' },
+      { label: 'Pricing month', get: l => linf(l).pricing != null ? fm(linf(l).pricing) : 'Crude blend' }
+    ];
     let p = [['Product summary (kb), display window. Products that share a benchmark (e.g. Jet and Kerosene) are reported together.'], [],
       ['Product benchmark', 'Products', 'Opening', 'Production', 'Purchases', 'Sales', 'Unmet demand', 'Closing']];
     V.productSummary(R, win).forEach(x => p.push([x.bench, x.products, r3(x.open), r3(x.production), r3(x.purchases), r3(x.sales), r3(x.unmet), r3(x.close)]));
