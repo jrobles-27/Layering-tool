@@ -16,6 +16,7 @@
   const MON = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
   const PRE = 0;
   const UNPLANNED = 1e9;
+  const UNTRACED = 1e9 - 2;   // produced before the product data starts: the crude behind it is unknown
   const UNPRICED = 1e9 - 1;    // in tank at this month-end but its pricing month has not arrived yet
   const END = 'END';
   const EARLIER = 'EARLIER';   // display bucket: months before the display window
@@ -24,6 +25,7 @@
 
   function fmtMonth(k) {
     if (k === PRE) return 'Pre-horizon';
+    if (k === UNTRACED) return 'Not traceable';
     if (k === UNPRICED) return 'Not yet priced';
     if (k === UNPLANNED) return 'Unplanned';
     if (k === END) return 'Unsold at end';
@@ -80,7 +82,7 @@
       ? (a, b) => a.pricing - b.pricing || a.avail - b.avail || a.id - b.id
       : (a, b) => a.avail - b.avail || a.pricing - b.pricing || a.id - b.id;
     /** A layer only carries price exposure once its pricing month has arrived. */
-    const pricedAt = (pricing, mk) => (typeof pricing === 'number' && pricing !== PRE && pricing !== UNPLANNED && pricing > mk) ? UNPRICED : pricing;
+    const pricedAt = (pricing, mk) => (typeof pricing === 'number' && pricing !== PRE && pricing !== UNPLANNED && pricing !== UNTRACED && pricing > mk) ? UNPRICED : pricing;
     const posOf = new Map(prio.map((c, i) => [c, i]));
     const catOf = (L, t) => {
       const d = t - L.a;
@@ -185,15 +187,11 @@
         const pb = pBenchOf(r.product);
         if (src === 'Production') {
           const bt = unspecified ? NaN : idx(r.month);
-          let comp, why = null;
-          if (unspecified) why = 'no production month given';
-          else if (bt >= pStart) why = `${fmtMonth(r.month)} is not before the first product month (${fmtMonth(months[pStart])})`;
-          else if (bt < 0) why = `crude data starts ${fmtMonth(start)}, after that production month`;
-          else if (!blends[bt]) why = 'no crude consumption in the crude data for that month';
-          if (why) {
-            add('warn', 'Opening product production cannot be traced to crude', `${r.product} produced ${unspecified ? '(month missing)' : fmtMonth(r.month)}, ${r.volume} kb: ${why}. Shown as "Pre-horizon" pricing. Extend the crude consumption data back to that month.`);
-            comp = [{ cargoId: -1, cargo: 'Unattributed', pricing: PRE, grade: 'Unattributed', bench: 'Unmapped', src: 'Crude', share: 1 }];
-          } else comp = blends[bt];
+          // This was made before the product data starts. The crude run in that month is known, but
+          // most of that month's output was already sold before the data begins and those sales are
+          // not in the file, so there is no honest way to say which crude is in the part that is
+          // left. It is carried as "Not traceable" and kept out of the crude layering entirely.
+          const comp = [{ cargoId: null, cargo: '', pricing: UNTRACED, grade: 'Pre-horizon production', bench: 'Not traceable', src: 'Pre-horizon production', share: 1 }];
           prodLayers.push({ id: plid++, product: r.product, type: 'Production', kind: 'Production', opening: true, a: unspecified ? -999 : bt, half: 0, avail: pStart,
             label: unspecified ? 'Prod (month missing) (opening stock)' : 'Prod ' + fmtMonth(r.month) + ' (opening stock)', prodKey: unspecified ? 'Opening stock' : r.month, vol: r.volume, rem: r.volume, comp });
         } else {
@@ -400,7 +398,7 @@
       if (t < pStart) return;
       const sold = expRows.filter(r => r.stage === 'Sold' && r.sale === mk);
       const tot = sum(sold.map(r => r.vol));
-      const inf = sum(sold.filter(r => r.kind === 'Production' && typeof r.prodKey === 'number' && r.prodKey < months[pStart]).map(r => r.vol));
+      const inf = sum(sold.filter(r => r.src === 'Pre-horizon production').map(r => r.vol));
       if (tot > EPS) inferredBySale[mk] = { vol: inf, total: tot, share: inf / tot };
     });
     /** Sales months whose layering is materially approximate (more than 0.5% inferred). */
@@ -419,15 +417,12 @@
     // Pre-horizon production is traced to the crude blend of its production month. That blend is a
     // reconstruction: the model knows the crude consumed then, but not which of that month's output
     // was already sold before the horizon. Say how much of the result rests on it.
-    if (pStart > 0 && approxMonths.length) {
-      const preRun = sum(cargoUse.filter(u => u.t < pStart).map(u => u.vol));
-      const kept = sum(openProducts.filter(r => (r.source || 'Opening') === 'Production' && r.volume > 0).map(r => r.volume));
-      const goneShare = preRun > 0 ? Math.max(0, preRun - kept) / preRun * 100 : 0;
-      const perMonth = approxMonths.map(m => `${fmtMonth(m)} ${(inferredBySale[m].share * 100).toFixed(0)}%`).join(', ');
-      add('warn', 'First months of the layering are approximate',
-        `${fmtMonth(months[pStart])} onwards is partly sold from stock produced before the product data starts. That stock has no stated pricing, so its crude mix is inferred from the crude run in each of those months - and ${goneShare.toFixed(0)}% of that output was already sold before the data begins, with those sales not in the file. ` +
-        `Share of each month's layering that rests on the inference: ${perMonth}. ` +
-        `Treat those months as indicative; the figures become reliable once sales are drawn from production the model can see.`);
+    if (approxMonths.length) {
+      const perMonth = approxMonths.map(m => `${fmtMonth(m)} ${(inferredBySale[m].vol).toFixed(0)} kb (${(inferredBySale[m].share * 100).toFixed(0)}%)`).join(', ');
+      add('info', 'Sales from pre-horizon production are excluded from the crude layering',
+        `Product made before ${fmtMonth(months[pStart])} has no traceable crude behind it: most of what was produced then was sold before the data starts, and those sales are not in the file, so the remaining stock cannot be assigned to a pricing month. ` +
+        `That volume is left out of the Crude Layering page, the percentage breakdown and the cargo analysis: ${perMonth}. ` +
+        `It is still counted in Product Layering, Margin Exposure and the month-end profile, where it appears as "Not traceable".`);
     }
     if (unpricedAtEnd.length) {
       const byM = {};
@@ -456,7 +451,7 @@
 
     // ---------- summary ----------
     const soldRows = expRows.filter(r => r.stage === 'Sold');
-    const aged = soldRows.filter(r => r.pricing !== PRE && r.pricing !== UNPLANNED);
+    const aged = soldRows.filter(r => r.pricing !== PRE && r.pricing !== UNPLANNED && r.pricing !== UNTRACED);
     const agedVol = sum(aged.map(r => r.vol));
     const waAge = agedVol > 0 ? sum(aged.map(r => r.vol * (r.sale - r.pricing))) / agedVol : null;
     const totals = snaps.map(s => sum(s.map(r => r.vol)));
@@ -517,6 +512,6 @@
     return { rowKeys, colKeys, get, rowTotals, colTotals, total };
   }
 
-  const api = { run, pivot, fmtMonth, PRE, UNPLANNED, UNPRICED, END, EARLIER, LATER, MON, sum, DEFAULT_PRIORITY, PRIORITY_LABELS, validPriority };
+  const api = { run, pivot, fmtMonth, PRE, UNPLANNED, UNPRICED, UNTRACED, END, EARLIER, LATER, MON, sum, DEFAULT_PRIORITY, PRIORITY_LABELS, validPriority };
   if (typeof module !== 'undefined' && module.exports) module.exports = api; else root.Engine = api;
 })(typeof window !== 'undefined' ? window : globalThis);

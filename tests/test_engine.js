@@ -76,17 +76,32 @@ R.crudeBal.forEach(b => near(b.open + b.receipts - b.consumed, b.close, `crude b
 const pv = E.pivot(soldRows, r => r.pricing, r => r.sale);
 near(pv.total, s.totalSold, 'pivot total');
 
-// opening product: labelled by source and month; production is traced to the crude of THAT month
+// opening product: labelled by source and month
 ok(R.layerOrder.includes('Prod Oct-26 (opening stock)') && R.layerOrder.includes('Opening purchase (priced Nov-26)'), 'opening layers state source and month');
 ok(!R.layerOrder.includes('Opening inventory'), 'no vague "Opening inventory" label');
 const openProdVol = sum(inp.openProducts.filter(r => r.source === 'Production').map(r => r.volume));
+// Production from before the product data starts is NOT traced to a crude blend: most of that
+// month's output was sold before the data begins, so which crude remains is unknowable.
 const octRows = R.expRows.filter(r => r.layer === 'Prod Oct-26 (opening stock)' && r.product === 'Gasoline 92');
-near(sum(octRows.map(r => r.vol)), 100, 'Gasoline opening production Oct-26 fully traced (sold + unsold)');
-ok(octRows.every(r => r.pricing !== E.PRE && r.pricing !== E.UNPLANNED && r.pricing <= k(2026, 9)), 'traced to crude priced before Oct-26 consumption');
-ok(octRows.every(r => r.prodKey === k(2026, 9) && r.cargoId >= 0), 'production month and cargo recorded for opening production');
-// the Oct-26 crude blend: shares equal Oct consumption by cargo
-const octUse = R.cargoUse.filter(u => u.month === k(2026, 9)), octC = sum(octUse.map(u => u.vol));
-octUse.forEach(u => near(sum(octRows.filter(r => r.cargoId === u.cargoId).map(r => r.vol)) / 100, u.vol / octC, 'opening production carries the Oct-26 crude blend of cargo ' + u.cargoId, 1e-9));
+near(sum(octRows.map(r => r.vol)), 100, 'the opening layer is fully accounted for (sold + unsold)');
+ok(octRows.every(r => r.pricing === E.UNTRACED), 'pre-horizon production carries the "Not traceable" pricing');
+ok(octRows.every(r => r.src === 'Pre-horizon production' && r.cargoId == null), 'it is not attributed to any cargo');
+ok(octRows.every(r => r.prodKey === k(2026, 9)), 'its production month is still recorded');
+// ... and it is therefore excluded from every crude view
+ok(V.crudeRows(R).every(r => r.src === 'Crude'), 'crude rows exclude pre-horizon production');
+const clProd = V.crudeLayering(R, {}, 'pricing', 'prod');
+ok(!clProd.rowKeys.includes(E.UNTRACED), 'no "Not traceable" row in the crude layering');
+ok(!clProd.colKeys.some(c => typeof c === 'number' && c < R.productStart), 'no pre-horizon production columns');
+near(clProd.colTotals[clProd.colKeys.indexOf(E.EARLIER)], 0, 'the "Earlier months" bucket is empty on the production axis');
+// the crude-layering production column equals that month's product OUTPUT, not the crude run
+R.months.filter(m => m >= R.productStart).forEach(m => {
+  const out = sum(inp.products.map(p => p.production[m] || 0));
+  near(clProd.colTotals[clProd.colKeys.indexOf(m)], out, 'crude layering column = product output for ' + E.fmtMonth(m), 1e-6);
+});
+// the untraced volume is measured and reported rather than silently dropped
+ok(R.approxMonths.length > 0 && R.approxMonths[0] === R.productStart, 'the first product month is flagged');
+near(R.inferredBySale[R.productStart].vol, sum(R.expRows.filter(x => x.stage === 'Sold' && x.sale === R.productStart && x.src === 'Pre-horizon production').map(x => x.vol)), 'the flagged volume is the untraced volume');
+ok(R.checks.some(c => /excluded from the crude layering/.test(c.title)), 'the exclusion is reported in the checks');
 // sales order in the first product month: older opening production first, then the priority order
 const gas = R.sales.filter(x => x.product === 'Gasoline 92' && x.sale === R.productStart);
 ok(gas[0].layer === 'Prod Oct-26 (opening stock)' && gas[1].layer === 'Prod Nov-26 (opening stock)' && gas[2].layer === 'Prod Dec-26 (opening stock)', 'opening production sold oldest first; Dec-26 counts as previous month production: ' + gas.map(x => x.layer).join(' > '));
@@ -139,14 +154,22 @@ ok(early.pStart === 2 && early.prodBal.length === 1 && early.prodBal[0].open ===
 ok(early.sales.filter(x => x.sale === kD && x.vol > 1e-9).map(x => `${x.layer}=${Math.round(x.vol)}`).join('; ') === 'Opening purchase (priced Sep-26)=20; Prod Oct-26 (opening stock)=40; Prod Nov-26 (opening stock)=20',
   'early-production sale order: ' + early.sales.filter(x => x.sale === kD && x.vol > 1e-9).map(x => `${x.layer}=${Math.round(x.vol)}`).join('; '));
 const ep = E.pivot(early.expRows.filter(r => r.stage === 'Sold'), r => r.pricing, r => r.sale);
-near(ep.get(k(2026, 7), kD), 50, 'early: Aug-priced crude sold in Dec = 40 (Oct prod) + 10 (Nov prod)');
-near(ep.get(kO, kD), 10, 'early: Oct-priced crude sold in Dec = 10 (Nov prod)');
-near(ep.get(k(2026, 8), kD), 20, 'early: purchase priced Sep sold in Dec = 20');
-const eu = E.pivot(early.expRows.filter(r => r.stage === 'Unsold product'), r => r.pricing, r => r.sale);
-near(eu.get(k(2026, 7), E.END), 20, 'early: unsold Nov production, Aug-priced share = 20');
-near(eu.get(kO, E.END), 120, 'early: unsold = 20 (Nov prod) + 100 (Dec prod), Oct-priced');
-near(early.summary.totalSold, 80, 'early: sold 80');
-// production-month dimension for the opening production
+// Dec sells 20 from the Sep-priced opening purchase (exact: it states its own price) and 60 from
+// pre-horizon production (40 made in Oct, 20 in Nov), which has no traceable crude behind it.
+near(ep.get(k(2026, 8), kD), 20, 'early: the opening purchase keeps its stated Sep-26 pricing');
+near(ep.get(E.UNTRACED, kD), 60, 'early: the 60 kb from pre-horizon production is "Not traceable"');
+near(ep.get(k(2026, 7), kD), 0, 'early: nothing is attributed to Aug-priced crude any more');
+near(ep.get(kO, kD), 0, 'early: nor to Oct-priced crude');
+// it is excluded from the crude layering, so that page shows only Dec production
+const ecl = V.crudeLayering(early, {}, 'pricing', 'prod', { start: kD, end: kD });
+near(ecl.total, 100, 'early: the crude layering shows only the 100 kb produced in Dec');
+ok(!ecl.rowKeys.includes(E.UNTRACED), 'early: no "Not traceable" row on the crude page');
+// but the volume is not lost: it is still sold, and still in the product balance
+near(early.summary.totalSold, 80, 'early: 80 kb is still sold in total');
+near(sum(early.sales.filter(x => x.sale === kD).map(x => x.vol)), 80, 'early: product layering still shows all 80 kb');
+near(early.inferredBySale[kD].vol, 60, 'early: 60 kb is reported as untraced');
+near(early.inferredBySale[kD].share, 0.75, 'early: that is 75% of the month');
+// production month is still known even though the crude is not
 const epd = E.pivot(early.expRows.filter(r => r.stage === 'Sold'), r => r.prodKey, r => r.sale);
 near(epd.get(kO, kD), 40, 'early: sold from Oct production = 40');
 near(epd.get(kN, kD), 20, 'early: sold from Nov production = 20');
@@ -160,9 +183,10 @@ const untraced = E.run({
   openProducts: [{ product: 'P', benchmark: 'C', volume: 30, source: 'Production', month: kN }],
   crudeImports: [], productPurchases: [], demand: [{ product: 'P', demand: { [kD]: 30 } }]
 });
-ok(untraced.checks.some(c => c.level === 'warn' && /cannot be traced/.test(c.title)), 'untraceable opening production is a warning');
-ok(untraced.expRows.filter(r => r.layer === 'Prod Nov-26 (opening stock)').every(r => r.pricing === E.PRE), 'untraceable opening production shows as Pre-horizon');
-near(untraced.summary.totalSold, 30, 'untraceable opening production is still sold');
+ok(untraced.checks.some(c => /excluded from the crude layering/.test(c.title)), 'the exclusion is reported');
+ok(untraced.expRows.filter(r => r.layer === 'Prod Nov-26 (opening stock)').every(r => r.pricing === E.UNTRACED), 'pre-horizon production shows as "Not traceable"');
+near(untraced.summary.totalSold, 30, 'it is still sold and still counted in the volumes');
+near(V.crudeLayering(untraced, {}, 'pricing', 'prod').total, 100, 'the crude layering shows only the 100 kb the model can trace');
 
 // ---------- 4. sales priority ----------
 const kJ = k(2027, 0), kF = k(2027, 1), kM = k(2027, 2);
@@ -229,10 +253,10 @@ R.cargoes.forEach(c => {
 ok(R.cargoes.length === inp.openCrude.length + inp.crudeImports.length + R.shortfalls.length, 'one cargo per layer + one per shortfall');
 ok(new Set(R.cargoes.map(c => c.label)).size === R.cargoes.length, 'cargo labels are unique');
 // crude-linked product rows = production in the horizon + traced opening production
-near(sum(R.expRows.filter(r => r.cargoId != null && r.cargoId >= 0 && (r.stage === 'Sold' || r.stage === 'Unsold product')).map(r => r.vol)), s.totalProduced + openProdVol, 'cargo-traced product == production + opening production', 1e-6);
+near(sum(R.expRows.filter(r => r.cargoId != null && r.cargoId >= 0 && (r.stage === 'Sold' || r.stage === 'Unsold product')).map(r => r.vol)), s.totalProduced, 'cargo-traced product == in-horizon production only (pre-horizon stock is untraced)', 1e-6);
 const cp = V.cargoByProduction(R, {}), cs = V.cargoBySales(R, {});
 near(cp.pv.total, s.totalConsumed + s.endCrude, 'cargo x production total (consumed + not yet consumed)');
-near(cs.pv.total, s.totalProduced + openProdVol + s.endCrude, 'cargo x sales total (product + unconsumed crude)', 1e-6);
+near(cs.pv.total, s.totalProduced + s.endCrude, 'cargo x sales total (traced product + unconsumed crude)', 1e-6);
 cs.list.forEach((c, i) => near(V.cargoProdSales(R, {}, c.id).total, cs.pv.rowTotals[i], 'per-cargo prod x sales == its sales row: ' + c.label, 1e-6));
 ok(V.cargoFilter(R, { bench: 'Dubai' }).every(c => c.bench === 'Dubai'), 'cargo benchmark filter');
 const pvv = V.crudeLayering(R, {}, 'pricing');
@@ -270,9 +294,10 @@ const crudeSold = soldRows.filter(r => r.src === 'Crude');   // the crude page e
 near(nb.colTotals[nb.colKeys.indexOf(E.EARLIER)], sum(crudeSold.filter(r => r.sale < k(2027, 2)).map(r => r.vol)), 'Earlier-months bucket = sales before the window');
 near(nb.colTotals[nb.colKeys.indexOf(E.LATER)], sum(crudeSold.filter(r => r.sale > k(2027, 4)).map(r => r.vol)), 'Later-months bucket = sales after the window');
 const wideProd = V.crudeLayering(R, {}, 'pricing', 'prod', full);
-ok(wideProd.colKeys.filter(c => typeof c === 'number').length === 10 && wideProd.colTotals[wideProd.colKeys.indexOf(k(2026, 9))] > 0, 'full window shows the crude-only production months (Oct-26 ...)');
+ok(wideProd.colKeys.filter(c => typeof c === 'number').length === 10, 'full window offers every production month as a column');
+near(wideProd.colTotals[wideProd.colKeys.indexOf(k(2026, 9))], 0, 'but pre-horizon production months are empty: that stock is untraced');
 const defProd = V.crudeLayering(R, {}, 'pricing', 'prod');
-near(defProd.colTotals[defProd.colKeys.indexOf(E.EARLIER)], sum(wideProd.colKeys.filter(c => typeof c === 'number' && c < R.productStart).map(c => wideProd.colTotals[wideProd.colKeys.indexOf(c)])), 'default window folds Sep-Dec production into Earlier months');
+near(defProd.colTotals[defProd.colKeys.indexOf(E.EARLIER)], 0, 'nothing lands in Earlier months on the production axis');
 // stock tables: months outside the window are hidden
 ok(V.monthEnd(R, 'pricing', '', {}, mid).colKeys.join() === [k(2027, 2), k(2027, 3), k(2027, 4)].join(), 'month-end table shows only window months');
 ok(V.monthEnd(R, 'pricing', '', {}, full).colKeys.length === 10, 'month-end table can show the crude-only months');
@@ -421,7 +446,7 @@ lateP.months.forEach((mk, t) => {
 // the demo prices every cargo before arrival, so nothing is ever unpriced there
 ok(R.unpricedAtEnd.length === 0, 'demo has no unpriced month-end crude');
 R.snaps.forEach((sn, t) => sn.forEach(r => {
-  if (typeof r.pricing === 'number' && r.pricing !== E.PRE && r.pricing !== E.UNPLANNED && r.pricing !== E.UNPRICED)
+  if (typeof r.pricing === 'number' && r.pricing !== E.PRE && r.pricing !== E.UNPLANNED && r.pricing !== E.UNPRICED && r.pricing !== E.UNTRACED)
     ok(r.pricing <= R.months[t], 'no future pricing month in a month-end snapshot');
 }));
 

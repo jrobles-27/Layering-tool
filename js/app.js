@@ -82,15 +82,14 @@
   const isApprox = ck => { const R = S.R; return typeof ck === 'number' && R.inferredBySale && R.inferredBySale[ck] && R.inferredBySale[ck].share > 0.005; };
   /** Wrap a column formatter so approximate sales months carry a marker. */
   const markCol = base => ck => (base ? base(ck) : fm(ck)) + (isApprox(ck) ? ' *' : '');
-  /** Banner naming the months that cannot be computed accurately, and why. */
+  /** Banner naming the volume left out of the crude views, and why. */
   function approxBanner() {
     const R = S.R;
     if (!R.approxMonths || !R.approxMonths.length) return '';
-    const list = R.approxMonths.map(m => `<b>${fm(m)}</b> (${(R.inferredBySale[m].share * 100).toFixed(0)}% of it)`).join(', ');
-    const one = R.approxMonths.length === 1;
-    return `<div class="note warn">${I('alert')}<div><b>${one ? 'One month is' : 'Some months are'} approximate, marked *: ${list}.</b> ` +
-      `These sales come from product made before ${fm(R.productStart)}, which is where the product data starts. That stock has no stated pricing, so its crude mix is inferred from the crude run in those months - and most of what was produced then was already sold before the data begins, with those sales not in the file. ` +
-      `The same limitation applies to working it out by hand. Later months are unaffected.</div></div>`;
+    const list = R.approxMonths.map(m => `<b>${fm(m)}</b> ${fmt(R.inferredBySale[m].vol)} kb (${(R.inferredBySale[m].share * 100).toFixed(0)}%)`).join(', ');
+    return `<div class="note warn">${I('alert')}<div><b>Part of these months is not traceable to crude and is left out here, marked *: ${list}.</b> ` +
+      `That volume was produced before ${fm(R.productStart)}, where the product data starts. Most of what was produced then had already been sold by then and those sales are not in the file, so there is no honest way to say which crude is in the stock that remains - picking a pricing month for it would be a guess. ` +
+      `It is still counted in Product Layering, Margin Exposure and the month-end profile, as "Not traceable". Later months are unaffected.</div></div>`;
   }
 
   // ---------- components ----------
@@ -256,7 +255,7 @@
     // KPIs follow the display window (Settings)
     const tot = wm.map(m => s.monthTotals[R.months.indexOf(m)]);
     let pi = 0; tot.forEach((v, i) => { if (v > tot[pi]) pi = i; });
-    const soldW = R.expRows.filter(r => r.stage === 'Sold' && inW(r.sale) && r.pricing !== E.PRE && r.pricing !== E.UNPLANNED);
+    const soldW = R.expRows.filter(r => r.stage === 'Sold' && inW(r.sale) && r.pricing !== E.PRE && r.pricing !== E.UNPLANNED && r.pricing !== E.UNTRACED);
     const ageV = sum(soldW.map(r => r.vol));
     const ageW = ageV > 0 ? sum(soldW.map(r => r.vol * (r.sale - r.pricing))) / ageV : null;
     const ageBy = pm.map(mk => {

@@ -56,11 +56,31 @@ A month-end column counts a barrel only once it is both in tank and **priced**. 
 
 All product analysis is grouped by **product benchmark**, so products priced off the same index (for example Jet and Kerosene under `Jet`) are reported together. Physical layering stays per product, because demand arrives per product; only the reporting is aggregated.
 
-## Accuracy of the first months
+## What the crude layering can and cannot trace
 
-When the product data starts later than the crude data, the first sales month is mostly sold from stock produced before the product data begins. That stock has no stated pricing, so its crude mix is inferred from the crude run in those months - and most of what was produced then was already sold before the data starts, with those sales absent from the file. Those months are therefore **indicative, not measured**.
+Product made **before the product data starts** has no traceable crude behind it. The crude run in
+those months is known, but most of that output was already sold before the data begins and those
+sales are not in the file, so there is no way to say which crude remains in the stock that is left.
+Assigning it a pricing month would be a guess.
 
-The tool computes the share that rests on the inference for every sales month, marks the affected column headers with , shows a banner on the pages that use them, and records it in Data Checks and the export. The effect decays fast: on a representative file the first month is about 65-68% inferred, the second around 1-5%, and later months are unaffected. The same limitation applies to working the layering out by hand.
+That volume is therefore **excluded** from the Crude Layering page, the percentage breakdown and the
+cargo analysis. The affected sales months are marked `*` with a banner giving the volume and share,
+and the same figures appear in Data Checks and the export. It is still counted in Product Layering,
+Margin Exposure and the month-end profile, where it shows as **Not traceable** — nothing is lost,
+it is simply not attributed to a pricing month. The same limitation applies to doing the layering
+by hand. Later months are unaffected: on a representative file the first month is around 65-68%
+untraceable, the second about 1-5%, and the rest clean.
+
+### Crude barrels or product barrels
+
+The two pages count different things, which is why their monthly totals differ:
+
+- **Crude Layering** counts **product** barrels traced back to crude, so a production-month column
+  equals that month's product output.
+- **Cargo Analysis** (by production month) counts **crude** barrels, so it equals that month's crude run.
+
+The gap between them is the yield loss. If October runs 5,028 kb of crude at a 92.7% yield, the
+cargo analysis shows 5,028 and the crude layering shows 4,659.
 
 ## Method
 
