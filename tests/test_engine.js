@@ -62,19 +62,33 @@ const prodSupply = sum(inp.openProducts.map(p => p.volume)) + sum(inp.productPur
 near(prodSupply - s.totalSold, s.endProd, 'product balance closes');
 
 const soldRows = R.expRows.filter(r => r.stage === 'Sold');
-near(sum(soldRows.map(r => r.vol)), s.totalSold, 'traced sold volume == met demand');
-near(sum(R.expRows.filter(r => r.stage === 'Unsold product').map(r => r.vol)), s.endProd, 'traced unsold == ending product');
+// Volumes on crude-sourced rows are CRUDE barrels: each product barrel carries C/P of crude, so the
+// yield loss is not netted off. Non-crude rows (purchases, untraced stock) stay in product barrels.
+const prodBarrels = rr => sum(rr.filter(r => r.src !== 'Crude').map(r => r.vol)) +
+  sum(rr.filter(r => r.src === 'Crude').map(r => r.vol * (R.producedByMonth[R.months.indexOf(r.prodKey)] / R.consumedByMonth[R.months.indexOf(r.prodKey)])));
+near(prodBarrels(soldRows), s.totalSold, 'converted back to product barrels, traced sales == met demand', 1e-6);
+near(prodBarrels(R.expRows.filter(r => r.stage === 'Unsold product')), s.endProd, 'and traced unsold == ending product', 1e-6);
+// each production month carries its whole crude run, not its product output
+R.months.filter(m => m >= R.productStart).forEach(m => {
+  const traced = sum(R.expRows.filter(r => r.src === 'Crude' && r.prodKey === m).map(r => r.vol));
+  near(traced, R.consumedByMonth[R.months.indexOf(m)], 'crude barrels traced for ' + E.fmtMonth(m) + ' == crude run', 1e-6);
+});
 near(sum(R.expRows.filter(r => r.stage === 'Unconsumed crude').map(r => r.vol)), s.endCrude, 'unconsumed crude rows == ending crude');
 R.months.forEach((mk, t) => {
+  // Month-end exposure is in crude-equivalent barrels: product in tank carries the crude behind it,
+  // so the total is at least the physical stock and exceeds it by the yield loss on that product.
   const snapTotal = sum(R.snaps[t].map(r => r.vol));
   const cInv = sum(R.crudeBal.filter(b => b.t === t).map(b => b.close));
   const pInv = sum(R.prodBal.filter(b => b.t === t).map(b => b.close));
-  near(snapTotal, cInv + pInv, 'snapshot == inventories at ' + E.fmtMonth(mk), 1e-6);
+  ok(snapTotal >= cInv + pInv - 1e-6, 'month-end exposure covers the physical stock at ' + E.fmtMonth(mk));
+  const crudeOnly = sum(R.snaps[t].filter(r => r.kind === 'Crude inventory').map(r => r.vol));
+  near(crudeOnly, cInv, 'the crude part still equals the crude in tank at ' + E.fmtMonth(mk), 1e-6);
 });
 R.prodBal.forEach(b => near(b.open + b.production + b.purchases - b.sales, b.close, `prod bal ${b.product} t${b.t}`, 1e-6));
 R.crudeBal.forEach(b => near(b.open + b.receipts - b.consumed, b.close, `crude bal ${b.grade} t${b.t}`, 1e-6));
 const pv = E.pivot(soldRows, r => r.pricing, r => r.sale);
-near(pv.total, s.totalSold, 'pivot total');
+near(pv.total, sum(soldRows.map(r => r.vol)), 'pivot total matches its rows');
+ok(pv.total > s.totalSold, 'and exceeds the product volume sold, because crude barrels include the yield loss');
 
 // opening product: labelled by source and month
 ok(R.layerOrder.includes('Prod Oct-26 (opening stock)') && R.layerOrder.includes('Opening purchase (priced Nov-26)'), 'opening layers state source and month');
@@ -95,8 +109,7 @@ ok(!clProd.colKeys.some(c => typeof c === 'number' && c < R.productStart), 'no p
 near(clProd.colTotals[clProd.colKeys.indexOf(E.EARLIER)], 0, 'the "Earlier months" bucket is empty on the production axis');
 // the crude-layering production column equals that month's product OUTPUT, not the crude run
 R.months.filter(m => m >= R.productStart).forEach(m => {
-  const out = sum(inp.products.map(p => p.production[m] || 0));
-  near(clProd.colTotals[clProd.colKeys.indexOf(m)], out, 'crude layering column = product output for ' + E.fmtMonth(m), 1e-6);
+  near(clProd.colTotals[clProd.colKeys.indexOf(m)], R.consumedByMonth[R.months.indexOf(m)], 'crude layering column = crude run for ' + E.fmtMonth(m), 1e-6);
 });
 // the untraced volume is measured and reported rather than silently dropped
 ok(R.approxMonths.length > 0 && R.approxMonths[0] === R.productStart, 'the first product month is flagged');
@@ -108,7 +121,7 @@ ok(gas[0].layer === 'Prod Oct-26 (opening stock)' && gas[1].layer === 'Prod Nov-
 soldRows.forEach(r => { if (r.pricing !== E.PRE && r.pricing !== E.UNPLANNED && r.src === 'Crude') ok(r.pricing <= r.sale, 'pricing not after sale'); });
 ok(R.shortfalls.length > 0 && R.unmet.length > 0, 'demo has a shortfall and unmet demand');
 ok(R.shortfalls.every(x => x.t >= R.pStart), 'demo shortfall is in the product horizon only');
-ok(R.checks.some(c => /Yield does not match/.test(c.title)), 'mass-balance warning');
+ok(R.checks.some(c => /Yield does not equal crude consumption/.test(c.title)), 'the yield gap is reported');
 ok(!R.checks.some(c => /cannot be traced/.test(c.title)), 'demo opening production is fully traceable');
 ok(s.waAge > 0 && s.waAge < 8, 'weighted-average age plausible: ' + s.waAge);
 ok(s.peakMonth >= R.productStart, 'peak exposure is within the product horizon');
@@ -253,10 +266,14 @@ R.cargoes.forEach(c => {
 ok(R.cargoes.length === inp.openCrude.length + inp.crudeImports.length + R.shortfalls.length, 'one cargo per layer + one per shortfall');
 ok(new Set(R.cargoes.map(c => c.label)).size === R.cargoes.length, 'cargo labels are unique');
 // crude-linked product rows = production in the horizon + traced opening production
-near(sum(R.expRows.filter(r => r.cargoId != null && r.cargoId >= 0 && (r.stage === 'Sold' || r.stage === 'Unsold product')).map(r => r.vol)), s.totalProduced, 'cargo-traced product == in-horizon production only (pre-horizon stock is untraced)', 1e-6);
+near(sum(R.expRows.filter(r => r.cargoId != null && r.cargoId >= 0 && (r.stage === 'Sold' || r.stage === 'Unsold product')).map(r => r.vol)), sum(R.months.filter(m => m >= R.productStart).map(m => R.consumedByMonth[R.months.indexOf(m)])), 'cargo-traced crude == crude run in the product horizon', 1e-6);
 const cp = V.cargoByProduction(R, {}), cs = V.cargoBySales(R, {});
 near(cp.pv.total, s.totalConsumed + s.endCrude, 'cargo x production total (consumed + not yet consumed)');
-near(cs.pv.total, s.totalProduced + s.endCrude, 'cargo x sales total (traced product + unconsumed crude)', 1e-6);
+// By production month the cargo view covers every month of crude data; by sales month it can only
+// cover crude run inside the product horizon, since earlier output is untraced.
+const inHorizonRun = sum(R.months.filter(m => m >= R.productStart).map(m => R.consumedByMonth[R.months.indexOf(m)]));
+near(cs.pv.total, inHorizonRun + s.endCrude, 'cargo x sales = crude run in the product horizon + crude still in tank', 1e-6);
+near(cp.pv.total, s.totalConsumed + s.endCrude, 'cargo x production = all crude run + crude still in tank', 1e-6);
 cs.list.forEach((c, i) => near(V.cargoProdSales(R, {}, c.id).total, cs.pv.rowTotals[i], 'per-cargo prod x sales == its sales row: ' + c.label, 1e-6));
 ok(V.cargoFilter(R, { bench: 'Dubai' }).every(c => c.bench === 'Dubai'), 'cargo benchmark filter');
 const pvv = V.crudeLayering(R, {}, 'pricing');

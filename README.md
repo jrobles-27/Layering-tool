@@ -71,16 +71,19 @@ it is simply not attributed to a pricing month. The same limitation applies to d
 by hand. Later months are unaffected: on a representative file the first month is around 65-68%
 untraceable, the second about 1-5%, and the rest clean.
 
-### Crude barrels or product barrels
+### Crude exposure is measured in crude barrels
 
-The two pages count different things, which is why their monthly totals differ:
+A month that runs C kb of crude into P kb of product attaches **C/P kb of crude to each product
+barrel**, so the month carries its full crude run and the yield loss is never netted off. If October
+runs 5,028 kb at a 92.7% yield, the Crude Layering production column shows **5,028**, matching the
+crude consumption plan and the cargo analysis - not the 4,659 kb of product that came out.
 
-- **Crude Layering** counts **product** barrels traced back to crude, so a production-month column
-  equals that month's product output.
-- **Cargo Analysis** (by production month) counts **crude** barrels, so it equals that month's crude run.
+A consequence worth knowing: month-end exposure is therefore in crude-equivalent barrels. Product in
+tank carries the crude behind it, so the exposure total is larger than the physical stock by the
+yield loss on that product. The crude portion still equals the crude in tank exactly.
 
-The gap between them is the yield loss. If October runs 5,028 kb of crude at a 92.7% yield, the
-cargo analysis shows 5,028 and the crude layering shows 4,659.
+Product volumes stay product volumes: Product Layering, Margin Exposure and the balances are all in
+product barrels, since a crack is quoted per product barrel.
 
 ## Method
 

@@ -60,7 +60,8 @@
       ['1', R.crudeOrder === 'pricing'
         ? 'Crude is consumed per grade in pricing-month order (oldest priced layer first), starting from the first crude month.'
         : 'Crude is consumed FIFO per grade in arrival order (what arrived first is run first; ties broken by pricing month), starting from the first crude month.'],
-      ['2', 'Each month\'s production is a pro-rata blend of the crude layers consumed that month (yields are not grade-specific). Opening product that was produced in an earlier month carries the crude blend of that month.'],
+      ["2", "Each month of production is a pro-rata blend of the crude layers consumed that month (yields are not grade-specific). Crude exposure is reported in CRUDE barrels: a month running C kb of crude into P kb of product attaches C/P kb of crude to each product barrel, so the month carries its full crude run and the yield loss is not netted off."],
+      ['2b', 'Product made before the product data starts has no traceable crude behind it (most of that output was sold before the data begins) and is excluded from the crude layering, the percentages and the cargo analysis. It still appears elsewhere as "Not traceable".'],
       ['3', 'Products are sold in this order: stock older than the previous month (incl. opening purchases) first, oldest first; then ' + R.priority.map((c, i) => (i + 1) + ') ' + E.PRIORITY_LABELS[c]).join('; ') + '.'],
       ['4', 'Crude inventory exposure runs from the crude pricing month until the product is sold. Margin (crack) exposure is the volume sold in the sales month.'],
       ['5', '"Pre-horizon" = pricing month not specified; "Unplanned" = crude needed beyond the purchase plan. Shortfalls below the ' + R.tolerance + ' kb tolerance are treated as rounding and ignored.'],
@@ -116,8 +117,8 @@
     const cp = V.cargoByProduction(R, {}, win), cs = V.cargoBySales(R, {}, win);
     ca = ca.concat(matrix('Crude kb by production month (when each cargo is run)', cp.pv, cargoLead));
     ca = ca.concat(matrix('Crude by production month - % of cargo', V.pct(cp.pv, 'row'), cargoLead));
-    ca = ca.concat(matrix('Product kb by sales month (when product from each cargo is sold)', cs.pv, cargoLead));
-    ca = ca.concat(matrix('Product by sales month - % of cargo', V.pct(cs.pv, 'row'), cargoLead));
+    ca = ca.concat(matrix('Crude kb by sales month (when the product made from each cargo is sold)', cs.pv, cargoLead));
+    ca = ca.concat(matrix('By sales month - % of cargo', V.pct(cs.pv, 'row'), cargoLead));
     ca = ca.concat(matrix('All cargoes combined: production month x sales month (kb)', V.cargoProdSales(R, {}, null, win), 'Production month', D.prod.fmt));
     X.utils.book_append_sheet(wb, sheet(ca), 'Cargo Analysis');
     const cd = [['Crude grade', 'Benchmark', 'Loading month', 'Arrival month', 'Pricing month', 'Production month', 'Sales month', 'Product', 'Product benchmark', 'Stage', 'Volume (kb)']];

@@ -375,7 +375,7 @@
       table = matrix(pctOn ? V.pct(pv, 'row') : pv, { id: 'cargo', rowCols, rowColor: color, colFmt: fm, dec: pctOn ? 1 : 0 });
     } else if (c.mode === 'sale') {
       const { pv } = V.cargoBySales(R, cf, WIN());
-      sub = 'Product kb traced to each cargo, by the month that product is sold. "Unsold at end" = product (or crude) still in stock at the end of the horizon. Product kb can differ slightly from crude kb where yields are not 100%.' + (pctOn ? ' Each cargo row = 100%.' : '');
+      sub = 'Crude kb of each cargo, by the month the product made from it is sold. "Unsold at end" = product (or crude) still in stock at the end of the horizon. Totals match the production view, since both are crude barrels.' + (pctOn ? ' Each cargo row = 100%.' : '');
       table = matrix(pctOn ? V.pct(pv, 'row') : pv, { id: 'cargo', rowCols, rowColor: color, colFmt: fm, dec: pctOn ? 1 : 0 });
     } else {
       const pv = V.cargoProdSales(R, cf, c.cargoId === '' ? null : c.cargoId, WIN());
@@ -404,12 +404,12 @@
     const ser = seriesFromPivot(pv, f.dim, false);
     const colWord = f.col === 'prod' ? 'the month the product was produced' : 'the month the product made from it is sold';
     const tail = f.col === 'prod' ? '"Not yet consumed" = crude still in tanks at the end of the horizon.' : '"Unsold" = still in tanks at the end of the horizon.';
-    return approxBanner() + card('Crude layering', `Volume (kb) of the refinery's own crude, by ${V.DIMS[f.dim].label.toLowerCase()} (rows) and ${colWord} (columns). ${tail}`,
+    return approxBanner() + card('Crude layering', `Crude barrels (kb) of the refinery's own crude, by ${V.DIMS[f.dim].label.toLowerCase()} (rows) and ${colWord} (columns). Volumes are crude, not product: a month that runs 5,028 kb into 4,659 kb of product still carries 5,028 kb here, so the yield loss is not netted off. ${tail}`,
       filters + matrix(pv, { id: 'crude', dim: f.dim, rowHdr: V.DIMS[f.dim].label, colFmt: f.col === 'sale' ? markCol(V.DIMS.sale.fmt) : undefined }), tableTools('crude'), true) + pctSection(filt) +
       `<div class="grid g-main">${card('Layering profile', 'Same data as the table, stacked by row group.', barChart('c_crude', ser.labels, ser.series, true))}
       ${card('How to read this', '', `<div class="how">Each row is a ${V.DIMS[f.dim].label.toLowerCase()}; each column is a <b>${f.col === 'prod' ? 'production' : 'product sales'} month</b>.<ol>
         <li>Crude is consumed <b>FIFO</b> by grade, so the oldest priced layer runs first.</li>
-        <li>Production is a <b>pro-rata blend</b> of the crude consumed that month.</li>
+        <li>Production is a <b>pro-rata blend</b> of the crude consumed that month, measured in <b>crude barrels</b>: each product barrel carries the crude behind it, so a month's column equals its crude run.</li>
         <li>Products are sold in the <b>sales priority</b> order set on the Product Layering page; each sale is traced back to the crude pricing month(s) behind it.</li>
         <li><b>Pre-horizon</b> = pricing month not given; <b>Unplanned</b> = crude needed beyond the purchase plan (gaps under the ${S.tolerance} kb tolerance are ignored).</li>
         <li>Products are grouped by <b>benchmark</b>, so products priced off the same index are analysed together.</li></ol></div>`)}</div>` + cargoSection(filt);

@@ -286,12 +286,15 @@
       consumedByMonth[t] = C;
 
       // --- production layers: pro-rata blend of crude consumed this month ---
-      let P = 0;
-      const compList = [...parts.values()].map(p => ({ cargoId: p.cargoId, cargo: p.cargo, pricing: p.pricing, grade: p.grade, bench: p.bench, src: 'Crude', share: C > 0 ? p.vol / C : 0 }));
+      // Crude exposure is carried in CRUDE barrels, not product barrels. A month that runs C kb of
+      // crude into P kb of product attaches C/P kb of crude to each product barrel, so the whole month's
+      // production carries exactly C kb of crude exposure and the yield loss is not silently netted
+      // off. The shares below therefore sum to C/P, not to 1.
+      const P = inProd ? sum(products.map(p => production[p][t])) : 0;
+      const compList = [...parts.values()].map(p => ({ cargoId: p.cargoId, cargo: p.cargo, pricing: p.pricing, grade: p.grade, bench: p.bench, src: 'Crude', share: P > 0 ? p.vol / P : 0 }));
       blends[t] = C > 0 ? compList : null;
       (inProd ? products : []).forEach(p => {
         const v = production[p][t];
-        P += v;
         if (v > 0) {
           const comp = C > 0 ? compList : [{ cargoId: -1, cargo: 'Unattributed', pricing: UNPLANNED, grade: 'Unattributed', bench: 'Unmapped', src: 'Crude', share: 1 }];
           prodLayers.push({ id: plid++, product: p, type: 'Production', kind: 'Production', a: t, half: 0, avail: t, label: 'Prod ' + fmtMonth(mk), prodKey: mk, vol: v, rem: v, comp });
@@ -299,7 +302,7 @@
       });
       producedByMonth[t] = P;
       if (P > 0 && C <= 0) add('error', 'Production without crude consumption', `${fmtMonth(mk)}: ${P.toFixed(1)} kb produced but no crude consumption planned; exposure cannot be traced.`);
-      if (inProd && C > 0 && Math.abs(P - C) / C > 0.001) add('warn', 'Yield does not match crude consumption', `${fmtMonth(mk)}: crude ${C.toFixed(1)} kb vs products ${P.toFixed(1)} kb (${(P - C >= 0 ? '+' : '') + (P - C).toFixed(1)}). Product exposure is traced pro-rata to crude consumed.`);
+      if (inProd && C > 0 && Math.abs(P - C) / C > 0.001) add('info', 'Yield does not equal crude consumption', `${fmtMonth(mk)}: crude ${C.toFixed(1)} kb in, products ${P.toFixed(1)} kb out (${(P - C >= 0 ? '+' : '') + (P - C).toFixed(1)} kb, ${(P / C * 100).toFixed(1)}% yield). Crude exposure is reported in crude barrels, so this month carries the full ${C.toFixed(1)} kb; the gap is not netted off.`);
 
       // --- demand (sales priority per product) ---
       (inProd ? products : []).forEach(p => {
