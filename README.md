@@ -56,6 +56,12 @@ A month-end column counts a barrel only once it is both in tank and **priced**. 
 
 All product analysis is grouped by **product benchmark**, so products priced off the same index (for example Jet and Kerosene under `Jet`) are reported together. Physical layering stays per product, because demand arrives per product; only the reporting is aggregated.
 
+## Accuracy of the first months
+
+When the product data starts later than the crude data, the first sales month is mostly sold from stock produced before the product data begins. That stock has no stated pricing, so its crude mix is inferred from the crude run in those months - and most of what was produced then was already sold before the data starts, with those sales absent from the file. Those months are therefore **indicative, not measured**.
+
+The tool computes the share that rests on the inference for every sales month, marks the affected column headers with , shows a banner on the pages that use them, and records it in Data Checks and the export. The effect decays fast: on a representative file the first month is about 65-68% inferred, the second around 1-5%, and later months are unaffected. The same limitation applies to working the layering out by hand.
+
 ## Method
 
 1. Crude is consumed FIFO per grade, in arrival order by default (ties broken by pricing month); switchable to pricing order in Settings.

@@ -77,6 +77,22 @@
   }
   const monthOrText = x => typeof x === 'number' ? fm(x) : x;
 
+  /** True when this sales month is partly sold from stock produced before the product data starts,
+   *  whose crude mix the model had to infer rather than read. */
+  const isApprox = ck => { const R = S.R; return typeof ck === 'number' && R.inferredBySale && R.inferredBySale[ck] && R.inferredBySale[ck].share > 0.005; };
+  /** Wrap a column formatter so approximate sales months carry a marker. */
+  const markCol = base => ck => (base ? base(ck) : fm(ck)) + (isApprox(ck) ? ' *' : '');
+  /** Banner naming the months that cannot be computed accurately, and why. */
+  function approxBanner() {
+    const R = S.R;
+    if (!R.approxMonths || !R.approxMonths.length) return '';
+    const list = R.approxMonths.map(m => `<b>${fm(m)}</b> (${(R.inferredBySale[m].share * 100).toFixed(0)}% of it)`).join(', ');
+    const one = R.approxMonths.length === 1;
+    return `<div class="note warn">${I('alert')}<div><b>${one ? 'One month is' : 'Some months are'} approximate, marked *: ${list}.</b> ` +
+      `These sales come from product made before ${fm(R.productStart)}, which is where the product data starts. That stock has no stated pricing, so its crude mix is inferred from the crude run in those months - and most of what was produced then was already sold before the data begins, with those sales not in the file. ` +
+      `The same limitation applies to working it out by hand. Later months are unaffected.</div></div>`;
+  }
+
   // ---------- components ----------
   function card(title, sub, body, tools, flush) {
     return `<section class="card"><div class="card-h"><div><h3>${title}</h3>${sub ? `<p>${sub}</p>` : ''}</div>${tools ? `<div class="tools">${tools}</div>` : ''}</div><div class="card-b${flush ? ' flush' : ''}">${body}</div></section>`;
@@ -315,7 +331,7 @@
     const series = sKeys.map((sk, j) => ({ label: sd.fmt(sk), color: sd.color(sk, j), data: xi.map(i => byRow ? pp.get(xKeys[i], sk) : pp.get(sk, xKeys[i])) })).filter(s => s.data.some(v => v > 1e-9));
     const chart = barChart('c_pct', xi.map(i => xd.fmt(xKeys[i])), series, true, '%');
     return card('Percentage breakdown', what + ' Uses the filters above.',
-      controls + matrix(pp, { id: 'pct', dim: p.row, rowHdr: V.DIMS[p.row].label, colFmt: V.DIMS[p.col].fmt, dec: 1 }), tableTools('pct'), true) +
+      controls + matrix(pp, { id: 'pct', dim: p.row, rowHdr: V.DIMS[p.row].label, colFmt: p.col === 'sale' ? markCol(V.DIMS.sale.fmt) : V.DIMS[p.col].fmt, dec: 1 }), tableTools('pct'), true) +
       card('Percentage profile', 'Same data as the percentage table, as 100% stacked bars.', chart);
   }
 
@@ -389,8 +405,8 @@
     const ser = seriesFromPivot(pv, f.dim, false);
     const colWord = f.col === 'prod' ? 'the month the product was produced' : 'the month the product made from it is sold';
     const tail = f.col === 'prod' ? '"Not yet consumed" = crude still in tanks at the end of the horizon.' : '"Unsold" = still in tanks at the end of the horizon.';
-    return card('Crude layering', `Volume (kb) of the refinery's own crude, by ${V.DIMS[f.dim].label.toLowerCase()} (rows) and ${colWord} (columns). ${tail}`,
-      filters + matrix(pv, { id: 'crude', dim: f.dim, rowHdr: V.DIMS[f.dim].label }), tableTools('crude'), true) + pctSection(filt) +
+    return approxBanner() + card('Crude layering', `Volume (kb) of the refinery's own crude, by ${V.DIMS[f.dim].label.toLowerCase()} (rows) and ${colWord} (columns). ${tail}`,
+      filters + matrix(pv, { id: 'crude', dim: f.dim, rowHdr: V.DIMS[f.dim].label, colFmt: f.col === 'sale' ? markCol(V.DIMS.sale.fmt) : undefined }), tableTools('crude'), true) + pctSection(filt) +
       `<div class="grid g-main">${card('Layering profile', 'Same data as the table, stacked by row group.', barChart('c_crude', ser.labels, ser.series, true))}
       ${card('How to read this', '', `<div class="how">Each row is a ${V.DIMS[f.dim].label.toLowerCase()}; each column is a <b>${f.col === 'prod' ? 'production' : 'product sales'} month</b>.<ol>
         <li>Crude is consumed <b>FIFO</b> by grade, so the oldest priced layer runs first.</li>
@@ -423,9 +439,9 @@
       <tr class="tot"><td>Total</td><td></td>${['open', 'production', 'purchases', 'sales', 'unmet', 'close'].map(k => `<td>${cell(sum(sumRows.map(x => x[k])))}</td>`).join('')}</tr></tbody></table></div>`;
     const sel = `<div class="filters">${select('Product benchmark', 'prod.bench', f.bench, [['', 'All benchmarks'], ...V.benchmarks(R).map(p => [p, p])])}
       <div class="field"><label>Rows</label>${seg('prod.kind', f.kind, [['', 'All sources'], ['Production', 'Production'], ['Purchase', 'Purchase']])}</div></div>`;
-    return priorityCard() + card('Product layering - sales by source',
+    return approxBanner() + priorityCard() + card('Product layering - sales by source',
         `Volume (kb) sold in each month (columns) from each opening / production / purchase layer (rows), following the sales priority above. Purchases are separate rows per pricing month.${f.kind ? ` Showing ${kindLabel[f.kind]} rows only.` : ''}`,
-        sel + matrix(pv, { id: 'prodlayer', rowCols: layerCols(R) }), tableTools('prodlayer'), true) +
+        sel + matrix(pv, { id: 'prodlayer', rowCols: layerCols(R), colFmt: markCol(fm) }), tableTools('prodlayer'), true) +
       `<div class="grid g2">${card('Sales by source layer', '', barChart('c_prod', ser.labels, ser.series, true))}
        ${card('Month-end inventory by layer', 'What is left in tanks at each month-end, by the layer it came from.', matrix(inv, { id: 'prodinv', rowCols: layerCols(R) }), tableTools('prodinv'), true)}</div>` +
       card('Product summary', `Display window, kb, grouped by benchmark. Products sharing a benchmark (e.g. Jet and Kerosene) are reported together.`, sumTbl, '', true);
@@ -441,9 +457,9 @@
     const view = (pv, basis) => pctOn ? V.pct(pv, basis) : pv;
     const dec = pctOn ? 1 : 0;
     const tools = seg('margin.show', f.show, [['vol', 'kb'], ['pct', '%']]);
-    return `<div class="grid g-main">${card('Margin (crack) exposure',
+    return approxBanner() + `<div class="grid g-main">${card('Margin (crack) exposure',
         `Product volume sold in each sales month that came out of the refinery (kb) - this volume carries crack exposure in that month. Purchased product has no crude leg and is excluded.${pctOn ? ' Each sales month = 100%.' : ''}`,
-        matrix(view(mb, 'col'), { id: 'margin', dim: 'pbench', rowHdr: 'Product benchmark', dec }), tools + tableTools('margin'), true)}
+        matrix(view(mb, 'col'), { id: 'margin', dim: 'pbench', rowHdr: 'Product benchmark', dec, colFmt: markCol(fm) }), tools + tableTools('margin'), true)}
       ${card('Crack volume by benchmark', '', barChart('c_margin', ser.labels, ser.series, true))}</div>` +
       `<div class="grid g2">${card('Crack exposure by production month', 'Which production month the crack volume sold in each month came from.', matrix(view(mpm, 'col'), { id: 'marginprod', dim: 'prod', rowHdr: 'Production month', dec }), tableTools('marginprod'), true)}
        ${card('Crude flat-price exposure released', 'Barrels sold each month whose crude price was fixed earlier, by crude benchmark.', matrix(view(cb, 'col'), { id: 'marginbench', rowHdr: 'Crude benchmark', rowFmt: x => x, dec }), tableTools('marginbench'), true)}</div>` +

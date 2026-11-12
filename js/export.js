@@ -44,6 +44,10 @@
     const sm = [
       ['Exposure Layering - results'], ['Volumes in thousand barrels (kb). Generated in the browser; nothing was stored or transmitted.'], [],
       ['Model timeline', `${fm(R.months[0])} to ${fm(R.months[R.months.length - 1])} (${R.months.length} months); product data from ${fm(R.productStart)}`],
+      (R.approxMonths && R.approxMonths.length
+        ? ['APPROXIMATE MONTHS', R.approxMonths.map(m => fm(m) + ' (' + (R.inferredBySale[m].share * 100).toFixed(0) + '% inferred)').join(', ') +
+            ' - sold from product made before the product data starts, whose crude mix is inferred rather than stated. Treat as indicative.']
+        : ['Approximate months', 'none']),
       ['Display window used in this export', `${fm(win.start)} to ${fm(win.end)}. Flow tables fold months outside it into "Earlier months" / "Later months"; stock tables hide them.`],
       ['Exposure at start of product horizon (crude in tanks + opening product)', r3(S.openingExposure)],
       ['Peak month-end exposure (product horizon)', r3(S.peakExposure), fm(S.peakMonth)],
@@ -67,7 +71,10 @@
     X.utils.book_append_sheet(wb, sheet(sm), 'Summary');
 
     // ---- Crude layering (own crude only; purchased product is product exposure, see Product Layering) ----
-    let a = [['Own crude only. Purchased and opening-purchase product carries product flat-price exposure and is reported on the Product Layering sheet.'], []];
+    let a = [['Own crude only. Purchased and opening-purchase product carries product flat-price exposure and is reported on the Product Layering sheet.']];
+    if (R.approxMonths && R.approxMonths.length) a.push(['APPROXIMATE: ' + R.approxMonths.map(m => fm(m) + ' ' + (R.inferredBySale[m].share * 100).toFixed(0) + '%').join(', ') +
+      ' of these sales months come from pre-horizon production with no stated pricing; their crude mix is inferred. Later months are unaffected.']);
+    a.push([]);
     a = a.concat(matrix('Crude layering: pricing month x sales month', CL({}, 'pricing'), 'Pricing month', pricingLabel));
     const benches = [...new Set(V.crudeRows(R).map(r => r.bench || 'Unmapped'))].sort();
     benches.forEach(b => { a = a.concat(matrix('Crude benchmark: ' + b, CL({ bench: b }, 'pricing'), 'Pricing month', pricingLabel)); });

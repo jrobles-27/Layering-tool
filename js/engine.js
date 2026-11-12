@@ -390,6 +390,22 @@
       add('info', 'Product purchase arrival timing', `${inp.productPurchases.length - n2} purchase(s) in the 1st half of the month, ${n2} in the 2nd half. Taken from the day of the arrival date (16th or later = 2nd half) or the "Arrival Half" column; a month-only date counts as 1st half.`);
     }
 
+    // ---------- how much of each sales month is inferred rather than measured ----------
+    // Product that was made before the product data starts has no stated pricing. Its crude mix is
+    // reconstructed from the crude consumed in its production month, and the part of that month's
+    // output already sold before the horizon is invisible. Any sales month drawing on that stock is
+    // approximate, and the first product month is usually mostly made of it.
+    const inferredBySale = {};
+    months.forEach((mk, t) => {
+      if (t < pStart) return;
+      const sold = expRows.filter(r => r.stage === 'Sold' && r.sale === mk);
+      const tot = sum(sold.map(r => r.vol));
+      const inf = sum(sold.filter(r => r.kind === 'Production' && typeof r.prodKey === 'number' && r.prodKey < months[pStart]).map(r => r.vol));
+      if (tot > EPS) inferredBySale[mk] = { vol: inf, total: tot, share: inf / tot };
+    });
+    /** Sales months whose layering is materially approximate (more than 0.5% inferred). */
+    const approxMonths = months.filter(m => inferredBySale[m] && inferredBySale[m].share > 0.005);
+
     // ---------- checks ----------
     const unmappedG = grades.filter(g => !crudeBench[g]);
     if (unmappedG.length) add('warn', 'Crude grades without benchmark', unmappedG.join(', ') + ' - shown as "Unmapped".');
@@ -403,19 +419,15 @@
     // Pre-horizon production is traced to the crude blend of its production month. That blend is a
     // reconstruction: the model knows the crude consumed then, but not which of that month's output
     // was already sold before the horizon. Say how much of the result rests on it.
-    if (pStart > 0) {
+    if (pStart > 0 && approxMonths.length) {
       const preRun = sum(cargoUse.filter(u => u.t < pStart).map(u => u.vol));
       const kept = sum(openProducts.filter(r => (r.source || 'Opening') === 'Production' && r.volume > 0).map(r => r.volume));
-      if (preRun > 0) {
-        const goneShare = Math.max(0, preRun - kept) / preRun * 100;
-        const firstSold = sum(expRows.filter(r => r.stage === 'Sold' && r.sale === months[pStart]).map(r => r.vol));
-        const fromPre = sum(expRows.filter(r => r.stage === 'Sold' && r.sale === months[pStart] && typeof r.prodKey === 'number' && r.prodKey < months[pStart]).map(r => r.vol));
-        add(goneShare > 50 ? 'warn' : 'info', 'Opening production is traced to a reconstructed crude blend',
-          `${preRun.toFixed(0)} kb of crude was run before ${fmtMonth(months[pStart])} but only ${kept.toFixed(0)} kb of that output is listed as opening stock, so ${goneShare.toFixed(0)}% of it was sold before the data starts and those sales are not in the file. ` +
-          `The pricing mix of the opening production is therefore inferred from the crude consumed in each of those months, not read from data. ` +
-          (firstSold > 0 ? `In ${fmtMonth(months[pStart])}, ${fromPre.toFixed(0)} kb of ${firstSold.toFixed(0)} kb sold (${(fromPre / firstSold * 100).toFixed(0)}%) depends on that inference. ` : '') +
-          `To remove the guesswork, add a "Pricing Month" column to Opening Product and state the mix directly, one row per pricing month.`);
-      }
+      const goneShare = preRun > 0 ? Math.max(0, preRun - kept) / preRun * 100 : 0;
+      const perMonth = approxMonths.map(m => `${fmtMonth(m)} ${(inferredBySale[m].share * 100).toFixed(0)}%`).join(', ');
+      add('warn', 'First months of the layering are approximate',
+        `${fmtMonth(months[pStart])} onwards is partly sold from stock produced before the product data starts. That stock has no stated pricing, so its crude mix is inferred from the crude run in each of those months - and ${goneShare.toFixed(0)}% of that output was already sold before the data begins, with those sales not in the file. ` +
+        `Share of each month's layering that rests on the inference: ${perMonth}. ` +
+        `Treat those months as indicative; the figures become reliable once sales are drawn from production the model can see.`);
     }
     if (unpricedAtEnd.length) {
       const byM = {};
@@ -467,7 +479,7 @@
     };
 
     return { months, pStart, productStart: months[pStart], grades, products, crudeBench, prodBench, expRows, sales, snaps, prodInv, crudeInv, crudeBal, prodBal, unmet, shortfalls,
-      consumedByMonth, producedByMonth, sold, demand, production, checks, summary, notes, layerOrder, layerType, layerInfo, priority: prio, cargoUse, tinyGaps, tolerance: TOL, crudeOrder, unpricedAtEnd,
+      consumedByMonth, producedByMonth, sold, demand, production, checks, summary, notes, layerOrder, layerType, layerInfo, inferredBySale, approxMonths, priority: prio, cargoUse, tinyGaps, tolerance: TOL, crudeOrder, unpricedAtEnd,
       cargoes: crudeLayers.map(l => ({ id: l.id, label: l.label, grade: l.grade, bench: l.bench, pricing: l.pricing,
         arrival: l.arrival == null ? null : l.arrival, loading: l.loading == null ? null : l.loading, src: l.src, seq: l.seq, vol: l.vol })).concat(extraCargo) };
   }
