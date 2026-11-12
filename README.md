@@ -50,7 +50,7 @@ Row labels are split into their own columns rather than packed into one string, 
 
 ## Month-end exposure
 
-A month-end column counts a barrel only once it is both in tank and priced. Crude that has arrived but whose pricing month is still ahead appears under **Not yet priced** instead of against that future month, so a month-end never shows exposure to a price that has not been set yet. Nothing is dropped — the total still ties to the closing stock on the Balances page — and the volumes are listed in Data Checks.
+A month-end column counts a barrel only once it is both in tank and **priced**. Crude that has arrived but whose pricing month is still ahead carries no flat-price exposure yet, so it is excluded from the month-end exposure figures (and from the dashboard) rather than counted against a future month. It stays in the Balances closing stock, and the excluded volume per month is listed in Data Checks, so exposure + not-yet-priced = closing stock.
 
 ## Products and benchmarks
 

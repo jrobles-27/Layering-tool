@@ -386,7 +386,7 @@
       ${select('Sold as (product benchmark)', 'crude.pbench', f.pbench, [['', 'All'], ...V.benchmarks(R).map(b => [b, b])])}
     </div>`;
     const ser = seriesFromPivot(pv, f.dim, false);
-    return card('Crude layering', 'Volume (kb) of the refinery\'s own crude, by pricing month (rows) and the month the product made from it is sold (columns). "Unsold" = still in tanks at the end of the horizon. Purchased product is not crude exposure and is on Product Layering.',
+    return card('Crude layering', 'Volume (kb) of the refinery\'s own crude, by pricing month (rows) and the month the product made from it is sold (columns). "Unsold" = still in tanks at the end of the horizon.',
       filters + matrix(pv, { id: 'crude', dim: f.dim, rowHdr: V.DIMS[f.dim].label }), tableTools('crude'), true) + pctSection(filt) +
       `<div class="grid g-main">${card('Layering profile', 'Same data as the table, stacked by row group.', barChart('c_crude', ser.labels, ser.series, true))}
       ${card('How to read this', '', `<div class="how">Each row is a pricing month (or other group); each column is a <b>product sales month</b>.<ol>

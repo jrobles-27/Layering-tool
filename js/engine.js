@@ -200,7 +200,7 @@
           if (unspecified) add('warn', 'Opening product without pricing month', `${r.product}: ${r.volume} kb of opening inventory has no month - assigned to "Pre-horizon". Add the month in the input.`);
           const pk = unspecified ? PRE : r.month;
           const purchase = src === 'Purchase';
-          prodLayers.push({ id: plid++, product: r.product, type: 'Opening', kind: purchase ? 'Purchase' : 'Opening', opening: true, a: purchase && !unspecified ? idx(pk) : -999, half: 0, avail: pStart,
+          prodLayers.push({ id: plid++, product: r.product, type: purchase && !unspecified ? 'Purchase' : 'Opening', kind: purchase ? 'Purchase' : 'Opening', opening: true, a: purchase && !unspecified ? idx(pk) : -999, half: 1, avail: pStart,
             label: purchase ? (unspecified ? 'Opening purchase (pricing month not specified)' : 'Opening purchase (priced ' + fmtMonth(pk) + ')') : openingLabel(pk),
             prodKey: purchase ? 'Purchased product' : 'Opening stock', vol: r.volume, rem: r.volume,
             comp: [{ pricing: pk, grade: purchase ? 'Purchased product' : 'Opening product', bench: pb, src: purchase ? 'Purchased product' : 'Opening product', share: 1 }] });
@@ -307,7 +307,7 @@
       (inProd ? products : []).forEach(p => {
         const open = prodClose[p];
         const prod = production[p][t];
-        const purch = sum(prodLayers.filter(l => l.product === p && l.type === 'Purchase' && l.avail === t).map(l => l.vol));
+        const purch = sum(prodLayers.filter(l => l.product === p && l.type === 'Purchase' && !l.opening && l.avail === t).map(l => l.vol));
         const need = demand[p][t];
         let soldVol = 0, unmetVol = 0;
         if (need > 0) {
@@ -333,17 +333,22 @@
 
       // --- month-end snapshots ---
       const snap = [];
-      // Month-end exposure: a barrel in tank whose pricing month is still in the future is not yet
-      // price-exposed, so it is reported as "Not yet priced" rather than against that future month.
+      // Month-end exposure counts a barrel only once its price is fixed. Crude in tank whose pricing
+      // month is still ahead carries no flat-price exposure yet, so it is left out of the exposure
+      // figures entirely and reported separately instead of against a future month.
       crudeLayers.filter(l => l.avail <= t && l.rem > EPS).forEach(l => {
-        const pk = pricedAt(l.pricing, mk);
-        if (pk === UNPRICED) unpricedAtEnd.push({ t, month: mk, grade: l.grade, pricing: l.pricing, vol: l.rem });
-        snap.push({ kind: 'Crude inventory', product: '', pbench: '', src: 'Crude', pricing: pk, grade: l.grade, bench: l.bench, vol: l.rem });
-        crudeInv.push({ t, month: mk, grade: l.grade, pricing: pk, src: l.src, vol: l.rem });
+        const unpriced = pricedAt(l.pricing, mk) === UNPRICED;
+        if (unpriced) unpricedAtEnd.push({ t, month: mk, grade: l.grade, bench: l.bench, pricing: l.pricing, vol: l.rem });
+        else snap.push({ kind: 'Crude inventory', product: '', pbench: '', src: 'Crude', pricing: l.pricing, grade: l.grade, bench: l.bench, vol: l.rem });
+        crudeInv.push({ t, month: mk, grade: l.grade, pricing: unpriced ? UNPRICED : l.pricing, src: l.src, vol: l.rem });
       });
       prodLayers.filter(l => l.avail <= t && l.rem > EPS).forEach(l => {
         prodInv.push({ t, month: mk, product: l.product, pbench: pBenchOf(l.product), layer: l.label, type: l.type, kind: l.kind, vol: l.rem });
-        l.comp.forEach(c => snap.push({ kind: 'Product inventory', product: l.product, pbench: pBenchOf(l.product), src: c.src, pricing: pricedAt(c.pricing, mk), grade: c.grade, bench: c.bench, vol: l.rem * c.share }));
+        l.comp.forEach(c => {
+          const v = l.rem * c.share;
+          if (pricedAt(c.pricing, mk) === UNPRICED) { unpricedAtEnd.push({ t, month: mk, grade: c.grade, bench: c.bench, pricing: c.pricing, vol: v }); return; }
+          snap.push({ kind: 'Product inventory', product: l.product, pbench: pBenchOf(l.product), src: c.src, pricing: c.pricing, grade: c.grade, bench: c.bench, vol: v });
+        });
       });
       snaps.push(snap);
     }
@@ -373,9 +378,9 @@
       const isProd = l.kind === 'Production';
       layerInfo[l.label] = {
         kind: l.kind, opening: !!l.opening,
-        month: isProd ? (typeof l.prodKey === 'number' ? l.prodKey : null) : (l.type === 'Purchase' ? months[Math.min(Math.max(l.a, 0), T - 1)] : null),
-        arrival: l.type === 'Purchase' ? months[Math.min(Math.max(l.a, 0), T - 1)] : null,
-        half: l.half || 0,
+        month: isProd ? (typeof l.prodKey === 'number' ? l.prodKey : null) : (l.type === 'Purchase' && !l.opening ? months[Math.min(Math.max(l.a, 0), T - 1)] : null),
+        arrival: l.type === 'Purchase' && !l.opening ? months[Math.min(Math.max(l.a, 0), T - 1)] : null,
+        half: l.opening ? 0 : (l.half || 0),
         pricing: isProd ? null : l.comp[0].pricing
       };
     });
@@ -398,7 +403,7 @@
     if (unpricedAtEnd.length) {
       const byM = {};
       unpricedAtEnd.forEach(x => { byM[fmtMonth(x.month)] = (byM[fmtMonth(x.month)] || 0) + x.vol; });
-      add('info', 'Crude in tank but not yet priced', Object.keys(byM).map(m => `${m}: ${byM[m].toFixed(0)} kb`).join('; ') + '. These cargoes have arrived but their pricing month is later, so they carry no price exposure yet and are shown as "Not yet priced" instead of against a future month.');
+      add('info', 'In tank but not yet priced - excluded from exposure', Object.keys(byM).map(m => m + ': ' + byM[m].toFixed(0) + ' kb').join('; ') + '. These barrels had arrived by that month-end but their pricing month was still ahead, so they carry no flat-price exposure yet and are left out of the month-end exposure figures. They remain in the Balances closing stock.');
     }
     if (tinyGaps.length) {
       const tot = sum(tinyGaps.map(x => x.vol));

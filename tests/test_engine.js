@@ -406,16 +406,17 @@ const lateP = E.run({
   productPurchases: [], demand: [{ product: 'P', demand: { [kJ2]: 50 } }]
 });
 const lme = V.monthEnd(lateP, 'pricing', '', {}, { start: kO2, end: kJ2 });
-near(lme.get(E.UNPRICED, kO2), 500, 'arrived but unpriced: shown as "Not yet priced" at that month-end');
 near(lme.get(kN2, kO2), 0, 'the future pricing month shows nothing in the earlier month-end');
-near(lme.get(kN2, kN2), 500, 'once the pricing month arrives it is priced exposure');
-near(lme.get(E.UNPRICED, kN2), 0, 'and no longer unpriced');
-ok(lateP.unpricedAtEnd.length === 1 && lateP.checks.some(c => /not yet priced/i.test(c.title)), 'unpriced crude is reported in the checks');
-// totals still tie to the physical closing stock: nothing is dropped, only relabelled
+near(sum(lme.colKeys.map(ck => ck === kO2 ? lme.colTotals[lme.colKeys.indexOf(ck)] : 0)), 0, 'arrived but unpriced: no exposure at all at that month-end');
+near(lme.get(kN2, kN2), 500, 'once the pricing month arrives it becomes priced exposure');
+ok(lateP.unpricedAtEnd.length === 1 && lateP.checks.some(c => /not yet priced/i.test(c.title)), 'the unpriced volume is reported in the checks');
+near(sum(lateP.unpricedAtEnd.map(x => x.vol)), 500, 'and the reported volume is the full cargo');
+// exposure + unpriced still ties to the physical closing stock: nothing is lost, only set aside
 lateP.months.forEach((mk, t) => {
   const snapTot = sum(lateP.snaps[t].map(r => r.vol));
+  const unp = sum(lateP.unpricedAtEnd.filter(x => x.t === t).map(x => x.vol));
   const inv = sum(lateP.crudeBal.filter(b => b.t === t).map(b => b.close)) + sum(lateP.prodBal.filter(b => b.t === t).map(b => b.close));
-  near(snapTot, inv, 'relabelling does not change the month-end total at ' + E.fmtMonth(mk));
+  near(snapTot + unp, inv, 'exposure + unpriced = closing stock at ' + E.fmtMonth(mk));
 });
 // the demo prices every cargo before arrival, so nothing is ever unpriced there
 ok(R.unpricedAtEnd.length === 0, 'demo has no unpriced month-end crude');
@@ -464,6 +465,33 @@ const aProd = R.layerOrder.find(l => R.layerType[l] === 'Production' && !li[l].o
 ok(li[aProd].kind === 'Production' && typeof li[aProd].month === 'number' && li[aProd].pricing === null, 'a production row has a production month and a blended price');
 const anOpen = R.layerOrder.find(l => li[l].opening && R.layerType[l] === 'Production');
 ok(anOpen && li[anOpen].opening === true && typeof li[anOpen].month === 'number', 'opening production keeps its production month');
+
+// ---------- 5l. opening purchases follow the sales priority by their month ----------
+// Product starts Dec. Opening stock: produced Nov 100, bought (priced Nov) 100, bought (priced Sep) 50.
+// Priority says previous month's PRODUCTION (1) before previous month's IMPORTS (2), and anything
+// older than that first. So Dec demand should draw: Sep purchase (old), then Nov production, then Nov purchase.
+const kNo = k(2026, 10), kDe = k(2026, 11);
+const op2 = E.run({
+  months: [k(2026, 9), kNo, kDe], productStart: kDe,
+  crudes: [{ grade: 'A', benchmark: 'B', consumption: { [k(2026, 9)]: 100, [kNo]: 100, [kDe]: 100 } }],
+  products: [{ product: 'P', benchmark: 'C', production: { [kDe]: 100 } }],
+  openCrude: [{ grade: 'A', benchmark: 'B', volume: 400, pricing: k(2026, 8) }],
+  openProducts: [
+    { product: 'P', benchmark: 'C', volume: 100, source: 'Production', month: kNo },
+    { product: 'P', benchmark: 'C', volume: 100, source: 'Purchase', month: kNo },
+    { product: 'P', benchmark: 'C', volume: 50, source: 'Purchase', month: k(2026, 8) }
+  ],
+  crudeImports: [], productPurchases: [], demand: [{ product: 'P', demand: { [kDe]: 200 } }]
+});
+const decOrder = op2.sales.filter(x => x.sale === kDe && x.vol > 1e-9).map(x => x.layer + '=' + Math.round(x.vol));
+ok(decOrder.join('; ') === 'Opening purchase (priced Sep-26)=50; Prod Nov-26 (opening stock)=100; Opening purchase (priced Nov-26)=50',
+  'previous-month production is sold before the previous-month opening purchase: ' + decOrder.join('; '));
+ok(op2.layerType['Opening purchase (priced Nov-26)'] === 'Purchase', 'an opening purchase still reports as a purchase');
+// it is opening stock, not a purchase receipt of that month
+const dbal = op2.prodBal.find(b => b.month === kDe);
+near(dbal.open, 250, 'all three opening layers are opening stock in the first product month');
+near(dbal.purchases, 0, 'and none of them counts as a purchase receipt');
+near(dbal.open + dbal.production + dbal.purchases - dbal.sales, dbal.close, 'the product balance still closes');
 
 // ---------- 6. robustness ----------
 const bad = P.parseAoa([['', 'Crude Consumption Plan'], ['', 'Crude Grade', 'Nov-26'], ['', 'X', 10]]);
