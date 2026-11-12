@@ -47,7 +47,7 @@
   // ---------- state ----------
   const S = {
     page: 'data', input: null, R: null, issues: [], file: '', win: null, priority: E.DEFAULT_PRIORITY.slice(),
-    f: { crude: { bench: '', grade: '', pbench: '', dim: 'pricing' }, prod: { bench: '', kind: '' }, margin: { show: 'vol' }, me: { dim: 'pricing', kind: '', bench: '' }, pct: { row: 'pricing', col: 'sale', basis: 'col' }, cargo: { mode: 'prod', show: 'vol', cargoId: '' }, dash: { dim: 'pricing', month: null }, bal: {} },
+    f: { crude: { bench: '', grade: '', pbench: '', dim: 'pricing', col: 'sale' }, prod: { bench: '', kind: '' }, margin: { show: 'vol' }, me: { dim: 'pricing', kind: '', bench: '' }, pct: { row: 'pricing', col: 'sale', basis: 'col' }, cargo: { mode: 'prod', show: 'vol', cargoId: '' }, dash: { dim: 'pricing', month: null }, bal: {} },
     charts: [], after: [], priceColors: {}, tbl: {}, tolerance: 0.5, showLoading: true, crudeOrder: 'arrival'
   };
 
@@ -378,18 +378,21 @@
     const benches = [...new Set(rows.map(r => r.bench || 'Unmapped'))].sort();
     const grades = [...new Set(rows.map(r => r.grade))].sort();
     const filt = { bench: f.bench, grade: f.grade, pbench: f.pbench };
-    const pv = V.crudeLayering(R, filt, f.dim, undefined, WIN());
+    const pv = V.crudeLayering(R, filt, f.dim, f.col, WIN());
     const filters = `<div class="filters">
-      ${select('Group rows by', 'crude.dim', f.dim, DIM_OPTS.filter(o => o[0] !== 'sale'))}
+      ${select('Group rows by', 'crude.dim', f.dim, DIM_OPTS.filter(o => o[0] !== f.col))}
+      ${select('Columns', 'crude.col', f.col, [['sale', 'Sales month'], ['prod', 'Production month']])}
       ${select('Crude benchmark', 'crude.bench', f.bench, [['', 'All'], ...benches.map(b => [b, b])])}
       ${select('Crude grade', 'crude.grade', f.grade, [['', 'All'], ...grades.map(b => [b, b])])}
       ${select('Sold as (product benchmark)', 'crude.pbench', f.pbench, [['', 'All'], ...V.benchmarks(R).map(b => [b, b])])}
     </div>`;
     const ser = seriesFromPivot(pv, f.dim, false);
-    return card('Crude layering', 'Volume (kb) of the refinery\'s own crude, by pricing month (rows) and the month the product made from it is sold (columns). "Unsold" = still in tanks at the end of the horizon.',
+    const colWord = f.col === 'prod' ? 'the month the product was produced' : 'the month the product made from it is sold';
+    const tail = f.col === 'prod' ? '"Not yet consumed" = crude still in tanks at the end of the horizon.' : '"Unsold" = still in tanks at the end of the horizon.';
+    return card('Crude layering', `Volume (kb) of the refinery's own crude, by ${V.DIMS[f.dim].label.toLowerCase()} (rows) and ${colWord} (columns). ${tail}`,
       filters + matrix(pv, { id: 'crude', dim: f.dim, rowHdr: V.DIMS[f.dim].label }), tableTools('crude'), true) + pctSection(filt) +
       `<div class="grid g-main">${card('Layering profile', 'Same data as the table, stacked by row group.', barChart('c_crude', ser.labels, ser.series, true))}
-      ${card('How to read this', '', `<div class="how">Each row is a pricing month (or other group); each column is a <b>product sales month</b>.<ol>
+      ${card('How to read this', '', `<div class="how">Each row is a ${V.DIMS[f.dim].label.toLowerCase()}; each column is a <b>${f.col === 'prod' ? 'production' : 'product sales'} month</b>.<ol>
         <li>Crude is consumed <b>FIFO</b> by grade, so the oldest priced layer runs first.</li>
         <li>Production is a <b>pro-rata blend</b> of the crude consumed that month.</li>
         <li>Products are sold in the <b>sales priority</b> order set on the Product Layering page; each sale is traced back to the crude pricing month(s) behind it.</li>

@@ -400,6 +400,23 @@
       shortfalls.forEach(s => { (byG[s.grade] = byG[s.grade] || []).push(`${fmtMonth(months[s.t])} ${s.vol.toFixed(0)} kb`); });
       Object.keys(byG).forEach(g => add('warn', `Crude shortfall: ${g}`, byG[g].join('; ') + '. Needs additional purchases - shown as "Unplanned" pricing.'));
     }
+    // Pre-horizon production is traced to the crude blend of its production month. That blend is a
+    // reconstruction: the model knows the crude consumed then, but not which of that month's output
+    // was already sold before the horizon. Say how much of the result rests on it.
+    if (pStart > 0) {
+      const preRun = sum(cargoUse.filter(u => u.t < pStart).map(u => u.vol));
+      const kept = sum(openProducts.filter(r => (r.source || 'Opening') === 'Production' && r.volume > 0).map(r => r.volume));
+      if (preRun > 0) {
+        const goneShare = Math.max(0, preRun - kept) / preRun * 100;
+        const firstSold = sum(expRows.filter(r => r.stage === 'Sold' && r.sale === months[pStart]).map(r => r.vol));
+        const fromPre = sum(expRows.filter(r => r.stage === 'Sold' && r.sale === months[pStart] && typeof r.prodKey === 'number' && r.prodKey < months[pStart]).map(r => r.vol));
+        add(goneShare > 50 ? 'warn' : 'info', 'Opening production is traced to a reconstructed crude blend',
+          `${preRun.toFixed(0)} kb of crude was run before ${fmtMonth(months[pStart])} but only ${kept.toFixed(0)} kb of that output is listed as opening stock, so ${goneShare.toFixed(0)}% of it was sold before the data starts and those sales are not in the file. ` +
+          `The pricing mix of the opening production is therefore inferred from the crude consumed in each of those months, not read from data. ` +
+          (firstSold > 0 ? `In ${fmtMonth(months[pStart])}, ${fromPre.toFixed(0)} kb of ${firstSold.toFixed(0)} kb sold (${(fromPre / firstSold * 100).toFixed(0)}%) depends on that inference. ` : '') +
+          `To remove the guesswork, add a "Pricing Month" column to Opening Product and state the mix directly, one row per pricing month.`);
+      }
+    }
     if (unpricedAtEnd.length) {
       const byM = {};
       unpricedAtEnd.forEach(x => { byM[fmtMonth(x.month)] = (byM[fmtMonth(x.month)] || 0) + x.vol; });

@@ -73,6 +73,7 @@ Worked example. Crude A: 100 kb opening priced Dec-26, plus 100 kb arriving Feb-
 
 Own crude only — purchased and opening-purchase product carries product flat-price exposure, not crude exposure, and is reported on Product Layering.
 
+- **Columns:** the main table switches between **sales month** and **production month** columns, so you can see when crude was run as well as when the product left.
 - **Percentage breakdown:** any row x column pairing of pricing month, production month, sales month, crude benchmark, crude grade or product benchmark, as % of each row, each column or the grand total (quick views for the common cases).
 - **Cargo analysis:** a cargo is one import or opening-inventory crude layer, with crude grade, loading month, arrival month and pricing month in separate columns. View each cargo by production month (when it is run), by sales month (when product made from it is sold), or production x sales for one cargo / all cargoes, in kb or % of cargo.
 
